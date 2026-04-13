@@ -3,7 +3,18 @@
 本项目用于在腾讯云 Windows Server + 山西证券 Ptrade 客户端环境中执行外部策略信号。
 系统只负责交易执行，不负责策略生成。
 
-## 标准目录结构
+## 正式上线统一入口
+
+请直接使用：`scripts/windows/go_live.ps1`
+
+它会按顺序执行：
+1. 配置填写（`fill_config.ps1`）
+2. 一键部署（`deploy_one_click.ps1`，含可选迁移）
+3. 部署检查（`verify_checklist.ps1`）
+
+---
+
+## 项目结构（当前正式版）
 
 ```text
 trader/
@@ -26,51 +37,50 @@ trader/
 │  │  └─ executor.py
 │  └─ main.py
 └─ scripts/
-   └─ run_ems.py
+   ├─ api_server.py
+   ├─ email_ingest_runner.py
+   ├─ ptrade_bridge_template.py
+   ├─ run_ems.py
+   ├─ run_migrations.py
+   ├─ send_order_api.py
+   ├─ submit_order_cli.py
+   └─ windows/
+      ├─ go_live.ps1
+      ├─ fill_config.ps1
+      ├─ deploy_one_click.ps1
+      ├─ verify_checklist.ps1
+      ├─ install_services.ps1
+      ├─ uninstall_services.ps1
+      └─ README_SERVICES.md
 ```
 
-## 1. 安装依赖
+---
 
-```bash
-pip install -r requirements.txt
+## Windows 上线（建议按此执行）
+
+在管理员 PowerShell：
+
+```powershell
+cd "E:\软件\cursorregister\trader"
+powershell -ExecutionPolicy Bypass -File scripts\windows\go_live.ps1 -ProjectRoot "E:\软件\cursorregister\trader" -PythonExe "python" -NssmExe "nssm" -EnableMailService
 ```
 
-> 注：Ptrade 内置 Python 环境如无法直接 `pip`，请按券商环境要求手工安装 `pymysql`、`sqlalchemy`、`requests`。
+如果不用邮件服务，去掉 `-EnableMailService`。
 
-## 2. 建表
+---
 
-在 MySQL 中执行：
+## 重要运行规则
 
-```sql
-source sql/create_trade_signals.sql;
+- `EMS_API`、`EMS_MAIL_INGEST` 由 NSSM 托管为 Windows 服务。
+- `EMS_RUNNER` 不作为服务，必须在 Ptrade 客户端策略环境中运行。
+- Ptrade 桥接脚本：`scripts/ptrade_bridge_template.py`
+
+---
+
+## 联调发单示例
+
+```powershell
+python scripts\send_order_api.py --url "http://<云服务器IP>:18080/signals" --auth_mode hmac --api_key "strategy01" --api_secret "<你的hmac_secret>" --stock_code "600519.SH" --signal_type ORDER --action BUY --volume 100 --price_type MARKET
 ```
 
-## 3. 配置
-
-编辑 `src/config.py`：
-- MySQL 连接信息
-- 钉钉 Webhook
-- 轮询间隔、最大重试次数
-
-## 4. 适配 Ptrade API
-
-编辑 `src/adapters/ptrade_adapter.py` 中以下函数，替换成山西证券 Ptrade 真实 API：
-- `get_position_volume`
-- `place_order`
-- `query_order`
-- `cancel_order`
-
-## 5. 启动
-
-```bash
-python scripts/run_ems.py
-```
-
-## 6. 运行逻辑概览
-
-- 每 5 秒轮询一次 `trade_signals` 中 `PENDING` 信号。
-- `ORDER` 模式：直接按 action + volume 下单。
-- `TARGET` 模式：先查持仓，计算差额后决定买卖方向与数量。
-- 对部分成交/未成交执行撤单 + 剩余补单重试。
-- 超过最大重试次数标记 `FAILED`。
-- 关键节点推送钉钉消息。
+更多参数和运维说明请看：`scripts/windows/README_SERVICES.md`

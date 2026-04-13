@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--action", default="BUY", choices=["BUY", "SELL"])
     parser.add_argument("--volume", type=int, required=True)
     parser.add_argument("--price_type", default="MARKET", choices=["MARKET", "LIMIT"])
+    parser.add_argument("--limit_price", type=float, default=None, help="price_type=LIMIT 时必填")
     args = parser.parse_args()
 
     payload = {
@@ -61,6 +62,11 @@ def main():
         "volume": args.volume,
         "price_type": args.price_type,
     }
+
+    if args.price_type == "LIMIT":
+        if args.limit_price is None or args.limit_price <= 0:
+            raise ValueError("price_type=LIMIT 时必须提供 --limit_price 且 > 0")
+        payload["limit_price"] = args.limit_price
 
     body_text = stable_json_body(payload)
     headers = {"Content-Type": "application/json"}

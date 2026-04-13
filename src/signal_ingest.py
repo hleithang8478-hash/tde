@@ -39,6 +39,18 @@ def normalize_signal(data: Dict[str, Any]) -> Dict[str, Any]:
     if volume <= 0:
         raise SignalValidationError("volume 必须大于 0")
 
+    limit_price: Optional[float] = None
+    if price_type == "LIMIT":
+        raw_limit = data.get("limit_price")
+        if raw_limit in (None, ""):
+            raise SignalValidationError("price_type=LIMIT 时必须传 limit_price")
+        try:
+            limit_price = round(float(raw_limit), 3)
+        except Exception as exc:
+            raise SignalValidationError("limit_price 必须为数字") from exc
+        if limit_price <= 0:
+            raise SignalValidationError("limit_price 必须大于 0")
+
     if signal_type == "ORDER":
         if action not in ("BUY", "SELL"):
             raise SignalValidationError("ORDER 模式下 action 必须为 BUY 或 SELL")
@@ -51,6 +63,7 @@ def normalize_signal(data: Dict[str, Any]) -> Dict[str, Any]:
         "action": action,
         "volume": volume,
         "price_type": price_type,
+        "limit_price": limit_price,
     }
 
 
@@ -63,4 +76,5 @@ def insert_signal(repo: SignalRepository, raw_data: Dict[str, Any]) -> int:
         action=normalized["action"],
         volume=normalized["volume"],
         price_type=normalized["price_type"],
+        limit_price=normalized["limit_price"],
     )

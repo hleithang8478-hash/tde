@@ -3,7 +3,7 @@
 
 import time
 import traceback
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from src.config import DINGTALK_WEBHOOK, MAX_RETRY, ORDER_WAIT_TIMEOUT, ORDER_POLL_INTERVAL
 from src.notifier.dingtalk_notifier import send_dingtalk
@@ -22,6 +22,7 @@ class TradeExecutor:
         action = signal["action"]
         volume = int(signal["volume"])
         price_type = signal["price_type"]
+        limit_price = signal.get("limit_price")
         retry_count = int(signal["retry_count"])
 
         try:
@@ -29,7 +30,7 @@ class TradeExecutor:
                 DINGTALK_WEBHOOK,
                 f"[开始执行]\n"
                 f"信号ID: {signal_id}\n股票: {stock_code}\n类型: {signal_type}\n"
-                f"动作: {action}\n数量: {volume}\n状态: PROCESSING"
+                f"动作: {action}\n数量: {volume}\n价格类型: {price_type}\n限价: {limit_price}\n状态: PROCESSING"
             )
 
             if signal_type == "ORDER":
@@ -61,6 +62,7 @@ class TradeExecutor:
                 action=real_action,
                 volume=real_volume,
                 price_type=price_type,
+                limit_price=limit_price,
                 base_retry_count=retry_count
             )
 
@@ -74,7 +76,16 @@ class TradeExecutor:
             )
             print(f"[ERROR] process_signal signal_id={signal_id} 异常:\n{traceback.format_exc()}")
 
-    def _execute_with_retry(self, signal_id: int, stock_code: str, action: str, volume: int, price_type: str, base_retry_count: int):
+    def _execute_with_retry(
+        self,
+        signal_id: int,
+        stock_code: str,
+        action: str,
+        volume: int,
+        price_type: str,
+        limit_price: Optional[float],
+        base_retry_count: int,
+    ):
         """委托执行状态机"""
         remaining = volume
         current_retry = base_retry_count
@@ -92,7 +103,7 @@ class TradeExecutor:
                 )
                 return
 
-            order_id = self.broker.place_order(stock_code, action, remaining, price_type)
+            order_id = self.broker.place_order(stock_code, action, remaining, price_type, limit_price=limit_price)
             self.repo.update_signal_status(signal_id, "PROCESSING", retry_count=current_retry, last_order_id=str(order_id), last_error=None)
 
             start = time.time()

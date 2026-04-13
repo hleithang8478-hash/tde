@@ -15,7 +15,7 @@ class SignalRepository:
     def fetch_pending_signals(self, batch_size: int = BATCH_SIZE) -> List[Dict[str, Any]]:
         """查询待处理信号（按创建时间升序）"""
         sql = text("""
-            SELECT signal_id, stock_code, signal_type, action, volume, price_type, status, retry_count, create_time, update_time
+            SELECT signal_id, stock_code, signal_type, action, volume, price_type, limit_price, status, retry_count, create_time, update_time
             FROM trade_signals
             WHERE status = 'PENDING'
             ORDER BY create_time ASC
@@ -43,6 +43,7 @@ class SignalRepository:
         volume: int,
         price_type: str = "MARKET",
         action: Optional[str] = None,
+        limit_price: Optional[float] = None,
     ) -> int:
         """插入待执行信号，并返回 signal_id"""
         sql = text("""
@@ -52,6 +53,7 @@ class SignalRepository:
                 action,
                 volume,
                 price_type,
+                limit_price,
                 status,
                 retry_count,
                 create_time,
@@ -62,6 +64,7 @@ class SignalRepository:
                 :action,
                 :volume,
                 :price_type,
+                :limit_price,
                 'PENDING',
                 0,
                 NOW(),
@@ -77,6 +80,7 @@ class SignalRepository:
                     "action": action,
                     "volume": volume,
                     "price_type": price_type,
+                    "limit_price": limit_price,
                 },
             )
             return int(result.lastrowid)

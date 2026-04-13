@@ -4,7 +4,6 @@ Param(
 
 $services = @(
     "EMS_API",
-    "EMS_RUNNER",
     "EMS_MAIL_INGEST"
 )
 

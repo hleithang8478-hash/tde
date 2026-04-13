@@ -45,6 +45,9 @@ def main():
             action = ask("动作(BUY/SELL，TARGET可留空)", "BUY")
             volume = ask("数量(整数)")
             price_type = ask("价格类型(MARKET/LIMIT)", "MARKET").upper()
+            limit_price = ""
+            if price_type == "LIMIT":
+                limit_price = ask("限价(limit_price)")
 
             raw = {
                 "stock_code": stock_code,
@@ -53,6 +56,8 @@ def main():
                 "volume": volume,
                 "price_type": price_type,
             }
+            if price_type == "LIMIT":
+                raw["limit_price"] = limit_price
             signal_id = insert_signal(repo, raw)
             print(f"[OK] 已写入信号 signal_id={signal_id}")
 

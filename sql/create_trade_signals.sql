@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS `trade_signals` (
   `action` ENUM('BUY', 'SELL') NULL COMMENT 'ORDER模式下必填，TARGET可空',
   `volume` INT NOT NULL COMMENT 'TARGET=目标总股数，ORDER=交易股数',
   `price_type` ENUM('MARKET', 'LIMIT') NOT NULL DEFAULT 'MARKET' COMMENT '市价/限价',
+  `limit_price` DECIMAL(10,3) NULL COMMENT '限价委托价格，MARKET可为空',
   `status` ENUM('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'PARTIAL') NOT NULL DEFAULT 'PENDING' COMMENT '执行状态',
   `retry_count` INT NOT NULL DEFAULT 0 COMMENT '重试次数',
   `last_order_id` VARCHAR(64) NULL COMMENT '最近一次委托单号',
