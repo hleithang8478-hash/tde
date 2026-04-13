@@ -3,6 +3,19 @@
 
 from typing import Dict, Any
 
+# --- Ptrade Built-in Stubs (For local linting) ---
+try:
+    get_position
+except NameError:
+    def get_position(sec): return None
+    def order(sec, amount, limit_price=None): return None
+    def get_order(order_id): return None
+    def get_orders(): return {}
+    def cancel_order(order_id): pass
+
+    def log(): pass
+# -------------------------------------------------
+
 
 class PtradeAdapter:
     def __init__(self):

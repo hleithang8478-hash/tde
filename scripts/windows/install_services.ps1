@@ -1,4 +1,4 @@
-Param(
+﻿Param(
     [string]$PythonExe = "python",
     [string]$NssmExe = "nssm",
     [string]$ProjectRoot = "C:\软件\trader"
@@ -25,4 +25,4 @@ Write-Host "Starting services..."
 & $NssmExe start EMS_API
 & $NssmExe start EMS_MAIL_INGEST
 
-Write-Host "服务安装并启动完成（不包含EMS_RUNNER，执行引擎需在Ptrade客户端内启动）。"
+Write-Host "Services installed."

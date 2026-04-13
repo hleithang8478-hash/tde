@@ -7,8 +7,8 @@ from datetime import datetime
 
 from sqlalchemy import create_engine
 
-from src.config import DB_CONFIG, BATCH_SIZE, POLL_INTERVAL_SECONDS, DINGTALK_WEBHOOK
-from src.notifier.dingtalk_notifier import send_dingtalk
+from src.config import DB_CONFIG, BATCH_SIZE, POLL_INTERVAL_SECONDS
+from src.notifier.system_notifier import send_notification
 from src.adapters.ptrade_adapter import PtradeAdapter
 from src.core.repository import SignalRepository
 from src.core.executor import TradeExecutor
@@ -58,7 +58,7 @@ def main():
             err = f"{type(e).__name__}: {str(e)}"
             print(f"[FATAL LOOP ERROR] {err}")
             print(traceback.format_exc())
-            send_dingtalk(DINGTALK_WEBHOOK, f"[系统异常]\nEMS主轮询异常: {err}\n已自动进入下一轮重试")
+            send_notification("EMS系统通知", f"[系统异常]\nEMS主轮询异常: {err}\n已自动进入下一轮重试")
             time.sleep(POLL_INTERVAL_SECONDS)
 
 

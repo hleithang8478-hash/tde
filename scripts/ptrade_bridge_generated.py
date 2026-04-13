@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Ptrade 客户端内桥接模板（复制到 Ptrade 策略编辑器运行）"""
 
 import sys
 import threading
 
 # 由 scripts/windows/fill_config.ps1 生成 ptrade_bridge_generated.py 时替换该占位符
-PROJECT_ROOT = r"{{PROJECT_ROOT_PLACEHOLDER}}"
+PROJECT_ROOT = r"C:\软件\trader"
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
@@ -23,3 +23,4 @@ def initialize(context):
 def handle_data(context, data):
     # 保持空实现即可
     pass
+

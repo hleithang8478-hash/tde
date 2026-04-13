@@ -27,7 +27,7 @@ trader/
 │  ├─ config.py
 │  ├─ notifier/
 │  │  ├─ __init__.py
-│  │  └─ dingtalk_notifier.py
+│  │  └─ system_notifier.py
 │  ├─ adapters/
 │  │  ├─ __init__.py
 │  │  └─ ptrade_adapter.py
@@ -73,7 +73,17 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\go_live.ps1 -ProjectRoo
 
 - `EMS_API`、`EMS_MAIL_INGEST` 由 NSSM 托管为 Windows 服务。
 - `EMS_RUNNER` 不作为服务，必须在 Ptrade 客户端策略环境中运行。
-- Ptrade 桥接脚本：`scripts/ptrade_bridge_template.py`
+- Ptrade 桥接脚本模板：`scripts/ptrade_bridge_template.py`
+- 实际在 Ptrade 中运行：`scripts/ptrade_bridge_generated.py`（由 `scripts/windows/fill_config.ps1` 自动生成）
+
+---
+
+## 通知模式配置 (NOTIFY_MODE)
+
+系统现已支持灵活的通知路由，在 `src/config.py` 中配置：
+
+- **NONE**: 静默模式。执行结果仅在本地日志 (`logs/ems_api.out.log`) 中打印，不进行外部推送。
+- **EMAIL**: 邮件模式。需同时配置 `SMTP_CONFIG`（发件服务器、端口、账号密码及收件人列表）。系统会在订单开始、成功、失败或触发重试时，实时发送邮件通知。
 
 ---
 

@@ -5,8 +5,8 @@ import time
 import traceback
 from typing import Dict, Any, Optional
 
-from src.config import DINGTALK_WEBHOOK, MAX_RETRY, ORDER_WAIT_TIMEOUT, ORDER_POLL_INTERVAL
-from src.notifier.dingtalk_notifier import send_dingtalk
+from src.config import MAX_RETRY, ORDER_WAIT_TIMEOUT, ORDER_POLL_INTERVAL
+from src.notifier.system_notifier import send_notification
 
 
 class TradeExecutor:
@@ -26,8 +26,8 @@ class TradeExecutor:
         retry_count = int(signal["retry_count"])
 
         try:
-            send_dingtalk(
-                DINGTALK_WEBHOOK,
+            send_notification(
+                "EMS交易执行通知",
                 f"[开始执行]\n"
                 f"信号ID: {signal_id}\n股票: {stock_code}\n类型: {signal_type}\n"
                 f"动作: {action}\n数量: {volume}\n价格类型: {price_type}\n限价: {limit_price}\n状态: PROCESSING"
@@ -44,8 +44,8 @@ class TradeExecutor:
                 diff = volume - current_volume
                 if diff == 0:
                     self.repo.update_signal_status(signal_id, "SUCCESS", retry_count=retry_count, last_error=None)
-                    send_dingtalk(
-                        DINGTALK_WEBHOOK,
+                    send_notification(
+                        "EMS交易执行通知",
                         f"[执行完成]\n信号ID: {signal_id}\n股票: {stock_code}\n"
                         f"TARGET目标仓位已满足，无需下单，状态: SUCCESS"
                     )
@@ -69,8 +69,8 @@ class TradeExecutor:
         except Exception as e:
             err = f"{type(e).__name__}: {str(e)}"
             self.repo.update_signal_status(signal_id, "FAILED", retry_count=min(retry_count + 1, MAX_RETRY), last_error=err)
-            send_dingtalk(
-                DINGTALK_WEBHOOK,
+            send_notification(
+                "EMS交易执行通知",
                 f"[执行异常]\n信号ID: {signal_id}\n股票: {stock_code}\n"
                 f"状态: FAILED\n错误: {err}"
             )
@@ -96,8 +96,8 @@ class TradeExecutor:
                     signal_id, "FAILED", retry_count=current_retry,
                     last_error=f"超过最大重试次数{MAX_RETRY}，剩余{remaining}股未成交"
                 )
-                send_dingtalk(
-                    DINGTALK_WEBHOOK,
+                send_notification(
+                    "EMS交易执行通知",
                     f"[执行失败]\n信号ID: {signal_id}\n股票: {stock_code}\n"
                     f"动作: {action}\n剩余: {remaining}\n状态: FAILED\n原因: 超过最大重试次数"
                 )
@@ -118,8 +118,8 @@ class TradeExecutor:
                 if st == "FILLED":
                     remaining = 0
                     self.repo.update_signal_status(signal_id, "SUCCESS", retry_count=current_retry, last_error=None)
-                    send_dingtalk(
-                        DINGTALK_WEBHOOK,
+                    send_notification(
+                        "EMS交易执行通知",
                         f"[执行成功]\n信号ID: {signal_id}\n股票: {stock_code}\n动作: {action}\n状态: SUCCESS"
                     )
                     return
@@ -136,8 +136,8 @@ class TradeExecutor:
             if last_order_state is None:
                 current_retry += 1
                 self.repo.update_signal_status(signal_id, "PARTIAL", retry_count=current_retry, last_error="未获取到订单状态，触发重试")
-                send_dingtalk(
-                    DINGTALK_WEBHOOK,
+                send_notification(
+                    "EMS交易执行通知",
                     f"[重试触发]\n信号ID: {signal_id}\n股票: {stock_code}\n原因: 未获取到订单状态\n第{current_retry}次重试即将开始"
                 )
                 continue
@@ -148,13 +148,14 @@ class TradeExecutor:
             try:
                 self.broker.cancel_order(str(order_id))
             except Exception:
+                # 注：A股撤单可能因处于撮合期而失败，此处仅做 Warning 记录，不要中断主流程
                 print(f"[WARN] cancel_order 失败, order_id={order_id}")
 
             if unfilled <= 0:
                 remaining = 0
                 self.repo.update_signal_status(signal_id, "SUCCESS", retry_count=current_retry, last_error=None)
-                send_dingtalk(
-                    DINGTALK_WEBHOOK,
+                send_notification(
+                    "EMS交易执行通知",
                     f"[执行成功]\n信号ID: {signal_id}\n股票: {stock_code}\n动作: {action}\n状态: SUCCESS"
                 )
                 return
@@ -162,7 +163,7 @@ class TradeExecutor:
             remaining = unfilled
             current_retry += 1
             self.repo.update_signal_status(signal_id, "PARTIAL", retry_count=current_retry, last_error=f"部分成交后重试，剩余{remaining}股")
-            send_dingtalk(
-                DINGTALK_WEBHOOK,
+            send_notification(
+                "EMS交易执行通知",
                 f"[部分成交重试]\n信号{signal_id}部分成交，已撤单，剩余{remaining}股，正在发起第{current_retry}次重试"
             )

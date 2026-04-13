@@ -1,4 +1,4 @@
-Param(
+﻿Param(
     [string]$ProjectRoot,
     [string]$PythonExe = "python",
     [string]$NssmExe = "nssm",
@@ -13,7 +13,6 @@ function Step($msg) {
     Write-Host "`n==== $msg ====" -ForegroundColor Cyan
 }
 
-# Auto-detect project root from script location to avoid non-ASCII path encoding issues
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 }
@@ -60,7 +59,7 @@ if (Test-Path -LiteralPath $verify) {
 
 Step "4/4 Next"
 Write-Host "Open Ptrade strategy editor, run bridge script:" -ForegroundColor Yellow
-Write-Host "  $ProjectRoot\scripts\ptrade_bridge_template.py" -ForegroundColor Yellow
+Write-Host "  $ProjectRoot\scripts\ptrade_bridge_generated.py" -ForegroundColor Yellow
 Write-Host "Then run one test order via send_order_api.py" -ForegroundColor Yellow
 
 Write-Host "`nGo-live flow completed." -ForegroundColor Green

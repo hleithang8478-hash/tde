@@ -1,5 +1,5 @@
-Param(
-    [string]$ProjectRoot = "C:\software\trader",
+﻿Param(
+    [string]$ProjectRoot = "C:\软件\trader",
     [string]$PythonExe = "python",
     [string]$NssmExe = "nssm",
     [switch]$EnableMailService,
@@ -112,7 +112,7 @@ foreach ($svc in $services) {
 
 Write-Step "9/9 Next steps"
 Write-Host "Open Ptrade strategy editor and run:"
-Write-Host "  $bridgeFile"
+Write-Host "  scripts\ptrade_bridge_generated.py"
 Write-Host "Do not run EMS_RUNNER as Windows service."
 
 Write-Host "`nDeploy finished." -ForegroundColor Green
