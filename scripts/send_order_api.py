@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""本地/策略机调用示例：通过HTTP推送信号到云端API（支持HMAC签名）"""
+"""本地/策略机调用示例（历史脚本）。
+
+当前云端 API 已改为「遥测外形 + Fernet 密文 + HMAC」，请优先使用 ems_commander.py 或按其中
+send_encrypted_signal_to_cloud 的逻辑自行封装。本脚本若不经改造将无法与新版 api_server 对接。
+"""
 
 import argparse
 import hashlib
@@ -39,7 +43,11 @@ def parse_path_from_url(url: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Send order signal to EMS API")
-    parser.add_argument("--url", required=True, help="例如: http://<云服务器IP>:18080/signals")
+    parser.add_argument(
+        "--url",
+        required=True,
+        help="新版示例: http://<主机>:18080/v1/agent/telemetry/beat（需自行实现遥测 JSON 与加密）",
+    )
 
     parser.add_argument("--auth_mode", default="hmac", choices=["hmac", "token"])
     parser.add_argument("--token", default="", help="Bearer token (auth_mode=token时使用)")

@@ -10,7 +10,7 @@ DB_CONFIG = {
     "charset": "utf8mb4",
 }
 
-NOTIFY_MODE = "NONE"  # 鍙€?"NONE", "EMAIL"
+NOTIFY_MODE = "NONE"  # 可选 "NONE", "EMAIL"
 SMTP_CONFIG = {
     "host": "",
     "port": 465,
@@ -22,7 +22,8 @@ SMTP_CONFIG = {
 POLL_INTERVAL_SECONDS = 5
 MAX_RETRY = 5
 BATCH_SIZE = 10
-ORDER_WAIT_TIMEOUT = 12
+# 等待单笔委托终态的轮询窗口（秒）；过短易误判未成交，建议实盘 ≥ 60
+ORDER_WAIT_TIMEOUT = 120
 ORDER_POLL_INTERVAL = 1
 
 EMAIL_INGEST_CONFIG = {
@@ -40,11 +41,28 @@ API_CONFIG = {
     "host": "0.0.0.0",
     "port": 18080,
     "token": "Qwer!1234567",
-    "ip_whitelist": ["1.203.161.66","127.0.0.1"],
+    "ip_whitelist": ["1.203.161.66", "127.0.0.1"],
     "hmac_enabled": True,
     "hmac_keys": {
         "strategy01": "Qwer!1234567",
     },
     "max_skew_seconds": 300,
     "nonce_ttl_seconds": 300,
+}
+
+# Ptrade 客户端内执行用（桥接 initialize + PtradeAdapter）
+# market_order_mode:
+#   - snapshot_order: order(security, amount) 由引擎按行情快照价报单（文档默认行为）
+#   - order_market: order_market(...)；上证必须保护限价，需 get_snapshot 可用
+PTRADE_CONFIG = {
+    "universe_static": [],
+    "universe_include_db_distinct": True,
+    "market_order_mode": "snapshot_order",
+    "sse_market_type": 0,
+    "sz_market_type": 0,
+    "sz_market_use_protect_limit": False,
+    "market_protect_buy_slippage": 0.02,
+    "market_protect_sell_slippage": 0.02,
+    "three_decimal_prefixes": None,
+    "price_decimal_overrides": None,
 }

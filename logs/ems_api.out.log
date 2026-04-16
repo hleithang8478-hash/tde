@@ -26,3 +26,6 @@
 [API] ems-api start at http://0.0.0.0:18080
  * Serving Flask app 'api_server'
  * Debug mode: off
+[API] ems-api start at http://0.0.0.0:18080
+ * Serving Flask app 'api_server'
+ * Debug mode: off

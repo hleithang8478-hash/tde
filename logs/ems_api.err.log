@@ -1159,3 +1159,9 @@ Press CTRL+C to quit
 1.203.161.66 - - [13/Apr/2026 14:16:00] "GET /signals HTTP/1.1" 200 -
 1.203.161.66 - - [13/Apr/2026 14:16:05] "GET /signals HTTP/1.1" 200 -
 1.203.161.66 - - [13/Apr/2026 14:16:10] "GET /signals HTTP/1.1" 200 -
+1.203.161.66 - - [13/Apr/2026 14:17:02] "GET /signals HTTP/1.1" 200 -
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:18080
+ * Running on http://10.2.0.9:18080
+Press CTRL+C to quit

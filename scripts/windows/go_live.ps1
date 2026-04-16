@@ -16,12 +16,41 @@ function Step($msg) {
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 }
+else {
+    $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
+}
+
+# 当前正在执行的 go_live.ps1 所在工程根（脚本在 scripts\windows\ 下）
+$goLiveRepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 
 $fillConfig = Join-Path $ProjectRoot "scripts\windows\fill_config.ps1"
 $deploy = Join-Path $ProjectRoot "scripts\windows\deploy_one_click.ps1"
 $verify = Join-Path $ProjectRoot "scripts\windows\verify_checklist.ps1"
 
-Write-Host "ProjectRoot: $ProjectRoot"
+Write-Host "ProjectRoot: $ProjectRoot" -ForegroundColor Cyan
+if ($ProjectRoot -ne $goLiveRepoRoot) {
+    Write-Host "go_live.ps1 所在工程: $goLiveRepoRoot" -ForegroundColor DarkCyan
+}
+
+if (-not (Test-Path -LiteralPath $deploy)) {
+    $deployAtInvoker = Join-Path $goLiveRepoRoot "scripts\windows\deploy_one_click.ps1"
+    if (Test-Path -LiteralPath $deployAtInvoker) {
+        throw @"
+在 -ProjectRoot 指定的目录下找不到 deploy_one_click.ps1：
+  $deploy
+
+但当前运行的 go_live.ps1 来自另一份完整工程：
+  $goLiveRepoRoot
+
+请二选一：
+  1) 使用与 go_live.ps1 同一份代码的根目录作为参数，例如：
+     -ProjectRoot `"$goLiveRepoRoot`"
+  2) 或把 Desktop 上的工程补全为完整仓库（含 scripts\windows\*.ps1），再指向该路径。
+
+不要混用「从 A 目录运行脚本」却「把 -ProjectRoot 指到不完整的 B 目录」。
+"@
+    }
+}
 
 Step "1/4 Fill config"
 if ($SkipConfigWizard) {
