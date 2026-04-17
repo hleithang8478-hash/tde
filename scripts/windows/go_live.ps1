@@ -2,6 +2,7 @@
     [string]$ProjectRoot,
     [string]$PythonExe = "python",
     [string]$NssmExe = "nssm",
+    [string]$LegacyConfigPath = "",
     [switch]$EnableMailService,
     [switch]$SkipConfigWizard,
     [switch]$SkipPipInstall
@@ -56,7 +57,11 @@ Step "1/4 Fill config"
 if ($SkipConfigWizard) {
     Write-Host "Skip config wizard (SkipConfigWizard)."
 } elseif (Test-Path -LiteralPath $fillConfig) {
-    & powershell -ExecutionPolicy Bypass -File $fillConfig -ProjectRoot $ProjectRoot
+    if (-not [string]::IsNullOrWhiteSpace($LegacyConfigPath)) {
+        & powershell -ExecutionPolicy Bypass -File $fillConfig -ProjectRoot $ProjectRoot -LegacyConfigPath $LegacyConfigPath
+    } else {
+        & powershell -ExecutionPolicy Bypass -File $fillConfig -ProjectRoot $ProjectRoot
+    }
 } else {
     Write-Warning "Missing optional script: $fillConfig, continue."
 }
@@ -87,8 +92,9 @@ if (Test-Path -LiteralPath $verify) {
 }
 
 Step "4/4 Next"
-Write-Host "Open Ptrade strategy editor, run bridge script:" -ForegroundColor Yellow
-Write-Host "  $ProjectRoot\scripts\ptrade_bridge_generated.py" -ForegroundColor Yellow
-Write-Host "Then run one test order via send_order_api.py" -ForegroundColor Yellow
+Write-Host "RPA: see scripts\RUN_EMS_执行步骤.md ; merge old config: scripts\merge_legacy_config.py --legacy ..." -ForegroundColor DarkGray
+Write-Host "RPA mode: on the Windows host with broker client, run EMS:" -ForegroundColor Yellow
+Write-Host "  python $ProjectRoot\scripts\run_ems.py" -ForegroundColor Yellow
+Write-Host "Then test: ems_commander.py -> telemetry beat, OR python scripts\submit_order_cli.py (DB); run RPA: python scripts\run_ems.py" -ForegroundColor Yellow
 
 Write-Host "`nGo-live flow completed." -ForegroundColor Green

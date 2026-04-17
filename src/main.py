@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 
 from src.config import DB_CONFIG, BATCH_SIZE, POLL_INTERVAL_SECONDS
 from src.notifier.system_notifier import send_notification
-from src.adapters.ptrade_adapter import PtradeAdapter
+from src.adapters.rpa_trade_adapter import RpaTradeAdapter
 from src.core.repository import SignalRepository
 from src.core.executor import TradeExecutor
 
@@ -33,7 +33,7 @@ def create_db_engine():
 def main():
     engine = create_db_engine()
     repo = SignalRepository(engine)
-    broker = PtradeAdapter()
+    broker = RpaTradeAdapter()
     executor = TradeExecutor(repo, broker)
 
     print(f"[{datetime.now()}] EMS启动成功，开始轮询...")

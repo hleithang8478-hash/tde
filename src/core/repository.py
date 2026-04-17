@@ -15,7 +15,8 @@ class SignalRepository:
     def fetch_pending_signals(self, batch_size: int = BATCH_SIZE) -> List[Dict[str, Any]]:
         """查询待处理信号（按创建时间升序）"""
         sql = text("""
-            SELECT signal_id, stock_code, signal_type, action, volume, price_type, limit_price, status, retry_count, create_time, update_time
+            SELECT signal_id, stock_code, signal_type, ui_panel, action, volume, quantity_mode, weight_pct,
+                   price_type, limit_price, status, retry_count, create_time, update_time
             FROM trade_signals
             WHERE status = 'PENDING'
             ORDER BY create_time ASC
@@ -44,14 +45,20 @@ class SignalRepository:
         price_type: str = "MARKET",
         action: Optional[str] = None,
         limit_price: Optional[float] = None,
+        quantity_mode: str = "ABSOLUTE",
+        weight_pct: Optional[float] = None,
+        ui_panel: Optional[str] = None,
     ) -> int:
         """插入待执行信号，并返回 signal_id"""
         sql = text("""
             INSERT INTO trade_signals (
                 stock_code,
                 signal_type,
+                ui_panel,
                 action,
                 volume,
+                quantity_mode,
+                weight_pct,
                 price_type,
                 limit_price,
                 status,
@@ -61,8 +68,11 @@ class SignalRepository:
             ) VALUES (
                 :stock_code,
                 :signal_type,
+                :ui_panel,
                 :action,
                 :volume,
+                :quantity_mode,
+                :weight_pct,
                 :price_type,
                 :limit_price,
                 'PENDING',
@@ -77,8 +87,11 @@ class SignalRepository:
                 {
                     "stock_code": stock_code,
                     "signal_type": signal_type,
+                    "ui_panel": ui_panel,
                     "action": action,
                     "volume": volume,
+                    "quantity_mode": quantity_mode,
+                    "weight_pct": weight_pct,
                     "price_type": price_type,
                     "limit_price": limit_price,
                 },
@@ -111,3 +124,29 @@ class SignalRepository:
                 "last_order_id": last_order_id,
                 "last_error": last_error
             })
+
+    def complete_ui_read_success(
+        self,
+        signal_id: int,
+        ui_ocr_text: str,
+        retry_count: int,
+    ) -> None:
+        """UI_READ 成功：写入 OCR 全文并置 SUCCESS。"""
+        sql = text("""
+            UPDATE trade_signals
+            SET status = 'SUCCESS',
+                ui_ocr_text = :ocr,
+                last_error = NULL,
+                retry_count = :retry_count,
+                update_time = NOW()
+            WHERE signal_id = :sid
+        """)
+        with self.engine.begin() as conn:
+            conn.execute(
+                sql,
+                {
+                    "sid": signal_id,
+                    "ocr": ui_ocr_text or "",
+                    "retry_count": retry_count,
+                },
+            )

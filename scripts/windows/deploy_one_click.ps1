@@ -35,10 +35,10 @@ $reqFile = Join-Path $ProjectRoot "requirements.txt"
 $configFile = Join-Path $ProjectRoot "src\config.py"
 $installSvcFile = Join-Path $ProjectRoot "scripts\windows\install_services.ps1"
 $apiFile = Join-Path $ProjectRoot "scripts\api_server.py"
-$bridgeFile = Join-Path $ProjectRoot "scripts\ptrade_bridge_template.py"
+$rpaAdapter = Join-Path $ProjectRoot "src\adapters\rpa_trade_adapter.py"
 $migrationPy = Join-Path $ProjectRoot "scripts\run_migrations.py"
 
-$mustFiles = @($reqFile, $configFile, $installSvcFile, $apiFile, $bridgeFile, $migrationPy)
+$mustFiles = @($reqFile, $configFile, $installSvcFile, $apiFile, $rpaAdapter, $migrationPy)
 foreach ($f in $mustFiles) {
     if (-not (Test-Path -LiteralPath $f)) {
         throw "Missing required file: $f"
@@ -111,8 +111,8 @@ foreach ($svc in $services) {
 }
 
 Write-Step "9/9 Next steps"
-Write-Host "Open Ptrade strategy editor and run:"
-Write-Host "  scripts\ptrade_bridge_generated.py"
-Write-Host "Do not run EMS_RUNNER as Windows service."
+Write-Host "EMS runner uses RPA (same machine as broker client). Run:"
+Write-Host "  python scripts\run_ems.py"
+Write-Host "Configure RPA bbox + confirm_button_xy in src\config.py before production."
 
 Write-Host "`nDeploy finished." -ForegroundColor Green

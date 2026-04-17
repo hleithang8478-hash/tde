@@ -53,10 +53,12 @@ else {
 
 $criticalFiles = @(
     "src\config.py",
-    "src\adapters\ptrade_adapter.py",
+    "src\adapters\rpa_trade_adapter.py",
     "scripts\api_server.py",
+    "scripts\configure_interactive.py",
+    "scripts\merge_legacy_config.py",
     "scripts\run_ems.py",
-    "scripts\ptrade_bridge_template.py",
+    "src\rpa\window_controller.py",
     "scripts\windows\go_live.ps1",
     "scripts\windows\deploy_one_click.ps1",
     "sql\create_trade_signals.sql"
@@ -85,10 +87,10 @@ foreach ($svcName in $services) {
 
 $runnerSvc = Get-Service -Name "EMS_RUNNER" -ErrorAction SilentlyContinue
 if ($null -ne $runnerSvc) {
-    Warn "检测到 EMS_RUNNER 服务（Ptrade 场景不推荐）"
+    Warn "检测到 EMS_RUNNER 服务（RPA 模式通常不安装该服务）"
 }
 else {
-    Pass "未检测到 EMS_RUNNER 服务（符合 Ptrade 内桥接模式）"
+    Pass "未检测到 EMS_RUNNER 服务（符合 RPA：本机 python scripts\run_ems.py）"
 }
 
 Section "2) API 与网络"
@@ -165,7 +167,7 @@ if (Test-Path -LiteralPath $configPath) {
 
     # 常见错误：JSON 小写 true/false 会导致 Python 报错（须用 -cmatch，避免把合法的 False 误判）
     if ($cfg -cmatch ':\s*false\b' -or $cfg -cmatch ':\s*true\b') {
-        Fail "config.py 中疑似使用 JSON 小写 true/false，Python 需要 True/False。请重新运行 fill_config.ps1 或手工改正。"
+        Fail "config.py 中疑似使用 JSON 小写 true/false，Python 需要 True/False。请重新运行 scripts/configure_interactive.py（或 fill_config.ps1）或手工改正。"
     }
     else {
         Pass "未发现 JSON 风格小写布尔值"
@@ -221,20 +223,20 @@ foreach ($lf in $logFiles) {
     }
 }
 
-Section "6) Ptrade 桥接"
-$bridgePath = Join-Path $ProjectRoot "scripts\ptrade_bridge_template.py"
-if (Test-Path -LiteralPath $bridgePath) {
-    $bridge = Get-Content -LiteralPath $bridgePath -Raw -Encoding UTF8
-    if ($bridge -match "from src.main import main" -and $bridge -match "def initialize\(context\)") {
-        Pass "桥接模板内容完整"
+Section "6) RPA 适配器"
+$rpaPath = Join-Path $ProjectRoot "src\adapters\rpa_trade_adapter.py"
+if (Test-Path -LiteralPath $rpaPath) {
+    $rpa = Get-Content -LiteralPath $rpaPath -Raw -Encoding UTF8
+    if ($rpa -match "class RpaTradeAdapter" -and $rpa -match "def place_order") {
+        Pass "RPA 适配器文件存在且含核心类"
     }
     else {
-        Warn "桥接模板内容可能不完整"
+        Warn "RPA 适配器内容可能不完整"
     }
-    Warn "无法自动判断 Ptrade 内策略是否已点击运行（需人工确认）"
+    Warn "无法自动确认券商客户端已登录且 RPA 坐标已配置（需人工确认）"
 }
 else {
-    Fail "缺少桥接模板文件"
+    Fail "缺少 RPA 适配器文件"
 }
 
 if ($CheckSystemTuning) {
@@ -289,4 +291,4 @@ else {
     Write-Host "检查完成：存在失败项，建议先修复 [FAIL]。" -ForegroundColor Red
 }
 
-Write-Host "提醒：最关键人工项是「Ptrade 客户端内桥接策略已运行」。" -ForegroundColor Yellow
+Write-Host "提醒：最关键人工项是「券商客户端已登录 + RPA_CONFIG 坐标/VLM 已配置 + 本机已运行 python scripts\run_ems.py」。" -ForegroundColor Yellow

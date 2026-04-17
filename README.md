@@ -1,6 +1,6 @@
-# A股自动交易执行系统（EMS）- Ptrade 执行端
+# A股自动交易执行系统（EMS）- Windows RPA 执行端
 
-本项目用于在腾讯云 Windows Server + 山西证券 Ptrade 客户端环境中执行外部策略信号。
+本项目用于在 Windows Server 与券商**桌面交易客户端**同机部署，通过 **RPA（窗口 + 纯鼠标填单为主，可选 VLM/OCR 校验）** 执行外部策略信号。
 系统只负责交易执行，不负责策略生成。
 
 ## 正式上线统一入口
@@ -8,9 +8,12 @@
 请直接使用：`scripts/windows/go_live.ps1`
 
 它会按顺序执行：
-1. 配置填写（`fill_config.ps1`）
+1. 配置填写（`fill_config.ps1` → `scripts/configure_interactive.py`：**快速 / 标准 / 完整**三档；**可选** `-LegacyConfigPath` 先从旧 `config.py` 合并再向导）
 2. 一键部署（`deploy_one_click.ps1`，含可选迁移）
 3. 部署检查（`verify_checklist.ps1`）
+
+**RPA 执行端逐步说明**（迁移、库表、`run_ems.py`）：见 `scripts/RUN_EMS_执行步骤.md`。  
+**单独合并旧配置**：`python scripts/merge_legacy_config.py --legacy "旧工程\src\config.py"`（可先 `--dry-run`）。
 
 ---
 
@@ -30,19 +33,28 @@ trader/
 │  │  └─ system_notifier.py
 │  ├─ adapters/
 │  │  ├─ __init__.py
-│  │  └─ ptrade_adapter.py
+│  │  └─ rpa_trade_adapter.py
 │  ├─ core/
 │  │  ├─ __init__.py
 │  │  ├─ repository.py
 │  │  └─ executor.py
+│  ├─ rpa/
+│  │  ├─ __init__.py
+│  │  ├─ window_controller.py
+│  │  ├─ vision_inspector.py
+│  │  ├─ rpa_input_engine.py
+│  │  ├─ rpa_config_manager.py
+│  │  └─ template_registry.py
 │  └─ main.py
 └─ scripts/
    ├─ api_server.py
    ├─ email_ingest_runner.py
-   ├─ ptrade_bridge_template.py
+   ├─ configure_interactive.py
+   ├─ merge_legacy_config.py
+   ├─ RUN_EMS_执行步骤.md
    ├─ run_ems.py
    ├─ run_migrations.py
-   ├─ send_order_api.py
+   ├─ rpa_calibrate.py
    ├─ submit_order_cli.py
    └─ windows/
       ├─ go_live.ps1
@@ -72,9 +84,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\go_live.ps1 -ProjectRoo
 ## 重要运行规则
 
 - `EMS_API`、`EMS_MAIL_INGEST` 由 NSSM 托管为 Windows 服务。
-- `EMS_RUNNER` 不作为服务，必须在 Ptrade 客户端策略环境中运行。
-- Ptrade 桥接脚本模板：`scripts/ptrade_bridge_template.py`
-- 实际在 Ptrade 中运行：`scripts/ptrade_bridge_generated.py`（由 `scripts/windows/fill_config.ps1` 自动生成）
+- `EMS_RUNNER` 不作为服务；**RPA 模式**下在本机与券商客户端同机运行 `python scripts/run_ems.py`（需已配置 `src/config.py` 中 `RPA_CONFIG`，当前默认 **纯鼠标链** `order_ui_mouse_flow`，递交模式见 `EXECUTOR_SUBMIT_ONLY_MODE`）。
 
 ---
 
@@ -87,10 +97,9 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\go_live.ps1 -ProjectRoo
 
 ---
 
-## 联调发单示例
+## 联调发单
 
-```powershell
-python scripts\send_order_api.py --url "http://<云服务器IP>:18080/signals" --auth_mode hmac --api_key "strategy01" --api_secret "<你的hmac_secret>" --stock_code "600519.SH" --signal_type ORDER --action BUY --volume 100 --price_type MARKET
-```
+- **生产路径**：云端 API 为遥测外形 + Fernet + HMAC，请使用仓库根目录 **`ems_commander.py`**（或与其一致的客户端）向 **`POST /v1/agent/telemetry/beat`** 发单；密钥须与 `scripts/api_server.py` 中 `ENCRYPTION_KEY` 一致。
+- **本机直写库（调试用）**：`python scripts/submit_order_cli.py` 将信号写入 MySQL，无需加密。
 
-更多参数和运维说明请看：`scripts/windows/README_SERVICES.md`
+更多说明：`scripts/windows/README_SERVICES.md`

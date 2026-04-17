@@ -43,7 +43,9 @@ def main():
             stock_code = ask("股票代码(如 600519.SH)")
             signal_type = ask("信号类型(ORDER/TARGET)", "ORDER").upper()
             action = ask("动作(BUY/SELL，TARGET可留空)", "BUY")
-            volume = ask("数量(整数)")
+            qm = ask("数量模式(ABSOLUTE=股数 / TARGET_PCT=目标仓位%)", "ABSOLUTE").upper()
+            volume = ask("数量(ABSOLUTE 时填整数股；TARGET_PCT 时可填 0)", "0")
+            wp = ask("目标仓位百分比 weight_pct（仅 TARGET_PCT 时填，如 25）", "")
             price_type = ask("价格类型(MARKET/LIMIT)", "MARKET").upper()
             limit_price = ""
             if price_type == "LIMIT":
@@ -54,8 +56,11 @@ def main():
                 "signal_type": signal_type,
                 "action": action,
                 "volume": volume,
+                "quantity_mode": qm,
                 "price_type": price_type,
             }
+            if qm == "TARGET_PCT" and wp.strip():
+                raw["weight_pct"] = wp.strip()
             if price_type == "LIMIT":
                 raw["limit_price"] = limit_price
             signal_id = insert_signal(repo, raw)

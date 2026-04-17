@@ -1,5 +1,10 @@
 ﻿Param(
-    [string]$ProjectRoot
+    [string]$ProjectRoot,
+    [string]$PythonExe = "python",
+    # 若填写，则先执行 merge_legacy_config.py 将旧 src/config.py 合并进本工程
+    [string]$LegacyConfigPath = "",
+    # 加 -FullWizard 才跑整套 configure_interactive；默认只跑「改一条存一条」的 simple_rpa_wizard
+    [switch]$FullWizard
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,192 +12,53 @@ $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 }
+else {
+    $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
+}
 
-function Ask($prompt, $default = "") {
-    if ($default -ne "") {
-        $v = Read-Host "$prompt [$default]"
-        if ([string]::IsNullOrWhiteSpace($v)) { return $default }
-        return $v
+$configWizard = Join-Path $ProjectRoot "scripts\configure_interactive.py"
+$simpleWizard = Join-Path $ProjectRoot "scripts\simple_rpa_wizard.py"
+$mergeScript = Join-Path $ProjectRoot "scripts\merge_legacy_config.py"
+if ($FullWizard) {
+    if (-not (Test-Path -LiteralPath $configWizard)) {
+        throw "找不到完整向导: $configWizard"
     }
-    return (Read-Host $prompt)
+}
+else {
+    if (-not (Test-Path -LiteralPath $simpleWizard)) {
+        throw "找不到简易配置脚本: $simpleWizard"
+    }
 }
 
-function AskBool($prompt, $default = "n") {
-    $v = (Ask $prompt $default).ToLower().Trim()
-    return ($v -in @("y", "yes", "true", "1"))
-}
-
-function EscapePy([string]$s) {
-    if ($null -eq $s) { return "" }
-    $t = $s -replace '\\', '\\\\'
-    $t = $t -replace '"', '\\"'
-    return $t
-}
-
-function PyBool([bool]$b) {
-    if ($b) { return "True" }
-    return "False"
-}
-
-$configPath = Join-Path $ProjectRoot "src\config.py"
-$templatePath = Join-Path $ProjectRoot "scripts\ptrade_bridge_template.py"
-$generatedBridgePath = Join-Path $ProjectRoot "scripts\ptrade_bridge_generated.py"
-
-if (-not (Test-Path -LiteralPath $configPath)) {
-    throw "Config file not found: $configPath"
-}
-if (-not (Test-Path -LiteralPath $templatePath)) {
-    throw "Ptrade bridge template not found: $templatePath"
-}
-
-Write-Host "=== Fill EMS config ===" -ForegroundColor Cyan
+Write-Host "=== EMS 配置 ===" -ForegroundColor Cyan
 Write-Host "ProjectRoot: $ProjectRoot" -ForegroundColor DarkCyan
-
-$dbHost = Ask "MySQL host" "127.0.0.1"
-$dbPort = Ask "MySQL port" "3306"
-$dbUser = Ask "MySQL user" "ems_user"
-$dbPass = Ask "MySQL password"
-$dbName = Ask "MySQL database" "trader"
-
-$notifyMode = (Ask "Enable System Notification? (NONE/EMAIL)" "NONE").ToUpper().Trim()
-while ($notifyMode -notin @("NONE", "EMAIL")) {
-    Write-Host "Only NONE or EMAIL is allowed." -ForegroundColor Yellow
-    $notifyMode = (Ask "Enable System Notification? (NONE/EMAIL)" "NONE").ToUpper().Trim()
+if ($FullWizard) {
+    Write-Host "模式: 完整向导 -> $configWizard" -ForegroundColor DarkGray
+}
+else {
+    Write-Host "模式: 逐项写入 config（改一条存一条）-> $simpleWizard" -ForegroundColor DarkGray
+    Write-Host "需要数据库/API 全套向导请加参数: -FullWizard" -ForegroundColor DarkYellow
 }
 
-$smtpHost = ""
-$smtpPort = "465"
-$smtpUser = ""
-$smtpPass = ""
-$smtpReceivers = @()
-if ($notifyMode -eq "EMAIL") {
-    $smtpHost = Ask "SMTP host" "smtp.qq.com"
-    $smtpPort = Ask "SMTP port" "465"
-    $smtpUser = Ask "SMTP user" ""
-    $smtpPass = Ask "SMTP password/app password" ""
-    $smtpReceiverInput = Ask "SMTP receivers (comma-separated)" ""
-    if (-not [string]::IsNullOrWhiteSpace($smtpReceiverInput)) {
-        $smtpReceivers = $smtpReceiverInput.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+Push-Location $ProjectRoot
+try {
+    if (-not [string]::IsNullOrWhiteSpace($LegacyConfigPath)) {
+        if (-not (Test-Path -LiteralPath $mergeScript)) {
+            throw "找不到合并脚本: $mergeScript"
+        }
+        if (-not (Test-Path -LiteralPath $LegacyConfigPath)) {
+            throw "找不到旧配置文件: $LegacyConfigPath"
+        }
+        Write-Host "先从旧 config 合并: $LegacyConfigPath" -ForegroundColor Yellow
+        & $PythonExe $mergeScript --legacy $LegacyConfigPath --project-root $ProjectRoot
+    }
+    if ($FullWizard) {
+        & $PythonExe $configWizard --project-root $ProjectRoot
+    }
+    else {
+        & $PythonExe $simpleWizard --project-root $ProjectRoot
     }
 }
-$smtpReceiversPy = ($smtpReceivers | ForEach-Object { '"' + (EscapePy $_) + '"' }) -join ", "
-
-$apiHost = Ask "API host" "0.0.0.0"
-$apiPort = Ask "API port" "18080"
-$apiToken = Ask "API token"
-$hmacEnabled = AskBool "Enable HMAC auth? (y/n)" "y"
-$hmacKeyId = Ask "HMAC key_id" "strategy01"
-$hmacSecret = Ask "HMAC secret"
-$maxSkew = Ask "HMAC max skew seconds" "300"
-$nonceTtl = Ask "Nonce ttl seconds" "300"
-
-$strategyIp = Ask "Strategy public IPs (comma separated, optional)" ""
-$ipItems = @()
-if (-not [string]::IsNullOrWhiteSpace($strategyIp)) {
-    $ipItems = $strategyIp.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+finally {
+    Pop-Location
 }
-$ipPy = ($ipItems | ForEach-Object { '"' + (EscapePy $_) + '"' }) -join ", "
-
-$emailEnabled = AskBool "Enable mail ingest? (y/n)" "n"
-$emailHost = Ask "IMAP host" "imap.qq.com"
-$emailPort = Ask "IMAP port" "993"
-$emailUser = Ask "Email username" ""
-$emailPass = Ask "Email app password" ""
-$emailFolder = Ask "Email folder" "INBOX"
-$emailPrefix = Ask "Email subject prefix" "EMS_SIGNAL"
-$emailPoll = Ask "Email poll seconds" "15"
-
-$orderWait = Ask "Order wait timeout seconds (Ptrade poll for fill)" "120"
-
-Write-Host "`n--- Ptrade (strategy bridge) ---" -ForegroundColor Cyan
-$ptradeUniverseInput = Ask "Ptrade universe: comma-separated codes (e.g. 600519.SH,000001.SZ), can be empty" ""
-$ptradeDbUniv = AskBool "Merge distinct stock_code from DB trade_signals into universe? (y/n)" "y"
-$ptradeMarketMode = (Ask "Market order mode: snapshot_order | order_market" "snapshot_order").Trim().ToLower()
-if ($ptradeMarketMode -notin @("snapshot_order", "order_market")) {
-    Write-Host "Invalid mode, using snapshot_order." -ForegroundColor Yellow
-    $ptradeMarketMode = "snapshot_order"
-}
-$ptradeSseMt = [int](Ask "If order_market: SSE market_type (int, doc 0..4)" "0")
-$ptradeSzMt = [int](Ask "If order_market: SZSE market_type (int, doc 0,2,3..5)" "0")
-$ptradeSzProtect = AskBool "SZ order_market: pass protection limit_price when snapshot available? (y/n)" "n"
-
-$ptradeParts = @()
-if (-not [string]::IsNullOrWhiteSpace($ptradeUniverseInput)) {
-    $ptradeParts = $ptradeUniverseInput.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-}
-$ptradeUniversePy = ($ptradeParts | ForEach-Object { '"' + (EscapePy $_) + '"' }) -join ", "
-
-$cfg = @"
-# -*- coding: utf-8 -*-
-"""Global config generated by fill_config.ps1"""
-
-DB_CONFIG = {
-    "host": "$(EscapePy $dbHost)",
-    "port": $dbPort,
-    "user": "$(EscapePy $dbUser)",
-    "password": "$(EscapePy $dbPass)",
-    "database": "$(EscapePy $dbName)",
-    "charset": "utf8mb4",
-}
-
-NOTIFY_MODE = "$(EscapePy $notifyMode)"  # 可选 "NONE", "EMAIL"
-SMTP_CONFIG = {
-    "host": "$(EscapePy $smtpHost)",
-    "port": $smtpPort,
-    "user": "$(EscapePy $smtpUser)",
-    "password": "$(EscapePy $smtpPass)",
-    "receivers": [$smtpReceiversPy],
-}
-
-POLL_INTERVAL_SECONDS = 5
-MAX_RETRY = 5
-BATCH_SIZE = 10
-ORDER_WAIT_TIMEOUT = $orderWait
-ORDER_POLL_INTERVAL = 1
-
-EMAIL_INGEST_CONFIG = {
-    "enabled": $(PyBool $emailEnabled),
-    "imap_host": "$(EscapePy $emailHost)",
-    "imap_port": $emailPort,
-    "username": "$(EscapePy $emailUser)",
-    "password": "$(EscapePy $emailPass)",
-    "folder": "$(EscapePy $emailFolder)",
-    "subject_prefix": "$(EscapePy $emailPrefix)",
-    "poll_interval_seconds": $emailPoll,
-}
-
-API_CONFIG = {
-    "host": "$(EscapePy $apiHost)",
-    "port": $apiPort,
-    "token": "$(EscapePy $apiToken)",
-    "ip_whitelist": [$ipPy],
-    "hmac_enabled": $(PyBool $hmacEnabled),
-    "hmac_keys": {
-        "$(EscapePy $hmacKeyId)": "$(EscapePy $hmacSecret)",
-    },
-    "max_skew_seconds": $maxSkew,
-    "nonce_ttl_seconds": $nonceTtl,
-}
-
-PTRADE_CONFIG = {
-    "universe_static": [$ptradeUniversePy],
-    "universe_include_db_distinct": $(PyBool $ptradeDbUniv),
-    "market_order_mode": "$(EscapePy $ptradeMarketMode)",
-    "sse_market_type": $ptradeSseMt,
-    "sz_market_type": $ptradeSzMt,
-    "sz_market_use_protect_limit": $(PyBool $ptradeSzProtect),
-    "market_protect_buy_slippage": 0.02,
-    "market_protect_sell_slippage": 0.02,
-    "three_decimal_prefixes": None,
-    "price_decimal_overrides": None,
-}
-"@
-
-Set-Content -LiteralPath $configPath -Value $cfg -Encoding UTF8
-Write-Host "Config written: $configPath" -ForegroundColor Green
-
-$templateContent = Get-Content -LiteralPath $templatePath -Raw -Encoding UTF8
-$resolvedProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
-$generatedContent = $templateContent.Replace("{{PROJECT_ROOT_PLACEHOLDER}}", $resolvedProjectRoot)
-Set-Content -LiteralPath $generatedBridgePath -Value $generatedContent -Encoding UTF8
-Write-Host "Ptrade bridge generated: $generatedBridgePath" -ForegroundColor Green

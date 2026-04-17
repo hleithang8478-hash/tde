@@ -1,7 +1,8 @@
 CREATE TABLE IF NOT EXISTS `trade_signals` (
   `signal_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '信号ID',
   `stock_code` VARCHAR(16) NOT NULL COMMENT '股票代码，如 600519.SH',
-  `signal_type` ENUM('TARGET', 'ORDER') NOT NULL COMMENT 'TARGET=目标仓位, ORDER=直接下单',
+  `signal_type` ENUM('TARGET', 'ORDER', 'UI_READ') NOT NULL COMMENT 'TARGET=目标仓位, ORDER=直接下单, UI_READ=底栏面板OCR',
+  `ui_panel` VARCHAR(32) NULL COMMENT 'UI_READ: orders|trades|funds|positions',
   `action` ENUM('BUY', 'SELL') NULL COMMENT 'ORDER模式下必填，TARGET可空',
   `volume` INT NOT NULL COMMENT 'TARGET=目标总股数，ORDER=交易股数',
   `price_type` ENUM('MARKET', 'LIMIT') NOT NULL DEFAULT 'MARKET' COMMENT '市价/限价',
@@ -10,6 +11,7 @@ CREATE TABLE IF NOT EXISTS `trade_signals` (
   `retry_count` INT NOT NULL DEFAULT 0 COMMENT '重试次数',
   `last_order_id` VARCHAR(64) NULL COMMENT '最近一次委托单号',
   `last_error` VARCHAR(500) NULL COMMENT '最近一次错误信息',
+  `ui_ocr_text` MEDIUMTEXT NULL COMMENT 'UI_READ 成功后的 OCR 全文',
   `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`signal_id`),

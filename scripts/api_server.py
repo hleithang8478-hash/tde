@@ -19,7 +19,26 @@ if PROJECT_ROOT not in sys.path:
 from src.config import DB_CONFIG, API_CONFIG
 from src.core.repository import SignalRepository
 from src.signal_ingest import insert_signal, SignalValidationError
+import src.signal_ingest as _signal_ingest_mod
 from src.security.auth import ReplayCache, stable_json_body, verify_signature
+
+print(
+    "[EMS-API] signal_ingest loaded:",
+    getattr(_signal_ingest_mod, "__file__", "?"),
+    "SIGNAL_SCHEMA_VERSION=",
+    getattr(_signal_ingest_mod, "SIGNAL_SCHEMA_VERSION", 0),
+    flush=True,
+)
+
+
+def _ingest_debug_suffix() -> str:
+    """校验失败时附在 error 后，便于区分「旧进程 / 错路径的 signal_ingest」。"""
+    try:
+        p = getattr(_signal_ingest_mod, "__file__", "?")
+        v = getattr(_signal_ingest_mod, "SIGNAL_SCHEMA_VERSION", 0)
+        return f" | ingest_file={p} | signal_schema_version={v}"
+    except Exception:
+        return ""
 
 # ================= 新增加密配置 =================
 # 必须和本地指挥部保持一致的 32 字节 Base64 编码密钥
@@ -125,7 +144,16 @@ def decrypt_payload(encrypted_dict):
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "service": "update-health", "time": datetime.now().isoformat()})
+    """含 signal_schema_version / signal_ingest_path，便于核对云端是否加载了带 UI_READ 的代码。"""
+    return jsonify(
+        {
+            "ok": True,
+            "service": "update-health",
+            "time": datetime.now().isoformat(),
+            "signal_schema_version": getattr(_signal_ingest_mod, "SIGNAL_SCHEMA_VERSION", 0),
+            "signal_ingest_path": getattr(_signal_ingest_mod, "__file__", ""),
+        }
+    )
 
 
 @app.get(PATH_TELEMETRY_CONFIG)
@@ -164,11 +192,14 @@ def telemetry_heartbeat():
         return jsonify({"ok": True, "signal_id": signal_id, "next_poll_sec": 3600})
 
     except SignalValidationError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": False, "error": str(e) + _ingest_debug_suffix()}), 400
     except Exception as e:
         print(f"[API ERROR] {PATH_TELEMETRY_BEAT} exception")
         print(traceback.format_exc())
-        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        err = f"{type(e).__name__}: {e}"
+        if "signal" in err.lower() or "trade_signals" in err.lower():
+            err += _ingest_debug_suffix()
+        return jsonify({"ok": False, "error": err}), 500
 
 
 @app.post(PATH_TELEMETRY_SYNC)
@@ -196,7 +227,7 @@ def telemetry_sync_batch():
                 signal_id = insert_signal(REPO, item)
                 result.append({"index": i, "ok": True, "signal_id": signal_id})
             except SignalValidationError as e:
-                result.append({"index": i, "ok": False, "error": str(e)})
+                result.append({"index": i, "ok": False, "error": str(e) + _ingest_debug_suffix()})
             except Exception as e:
                 result.append({"index": i, "ok": False, "error": f"{type(e).__name__}: {e}"})
 

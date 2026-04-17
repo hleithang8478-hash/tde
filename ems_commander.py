@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import sys
 import pandas as pd
 from flask import Flask, render_template_string, request, jsonify
 import requests
@@ -15,12 +17,18 @@ if not LOG.handlers:
     LOG.addHandler(_h)
 LOG.setLevel(logging.INFO)
 
+# 保证可 import src.*（本机直写库等）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 # ================= 配置区 =================
 # 端口分工（勿混）：
 #   - 18080：策略/信号 HTTP 入口（本程序只连这里：拉列表、下发指令）。云端 api_server 对外监听此端口。
 #   - 3306：MySQL，只给云端服务连库用；本地指挥部不直连数据库，查到的列表是 18080 读库后返回的 JSON。
 # 云端 API 根地址（不含路径）；请求外形为遥测/心跳。
 CLOUD_API_BASE = "http://120.53.250.208:18080"
+# UI_READ 是否绕过云 api、直接用本机 src.config.DB_CONFIG 写库（仅当本机能连上 MySQL 时设环境变量 EMS_UI_READ_INSERT_MODE=direct）
 # 访问云端时是否使用系统代理（HTTP_PROXY 等）。仅当「直连云 IP 根本不通、必须走代理出网」时改为 True。
 CLOUD_TRUST_ENV_PROXY = False
 CLOUD_REQUEST_TIMEOUT = 15
@@ -520,6 +528,8 @@ HTML_TEMPLATE = """
               <div class="col-md-6"><small class="text-muted d-block">定价模式</small><div id="detailPriceType">-</div></div>
               <div class="col-md-6"><small class="text-muted d-block">预约阈值</small><div id="detailLimitPx">-</div></div>
               <div class="col-12"><small class="text-muted d-block">记录时间</small><div id="detailTime">-</div></div>
+              <div class="col-md-6"><small class="text-muted d-block">面板查询(ui_panel)</small><div id="detailUiPanel" style="font-family:ui-monospace,monospace;">—</div></div>
+              <div class="col-12"><small class="text-muted d-block">面板 OCR 全文（UI_READ 完成后）</small><pre id="detailUiOcr" class="mb-0" style="white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto;background:#f8fafc;padding:8px;border-radius:6px;border:1px solid #e2e8f0;">—</pre></div>
             </div>
           </div>
         </div>
@@ -568,6 +578,7 @@ HTML_TEMPLATE = """
                 <div class="card-body">
                     <div class="mb-4">
                         <h5 class="mb-3" style="color:#0f172a;"><i class="fas fa-fingerprint me-2"></i>接入参数</h5>
+                        <div id="standardDispatchFields">
                         <div class="mb-3">
                             <label class="form-label mb-2">接入主体指纹</label>
                             <input type="text" id="target_hash" class="form-control" placeholder="例如 EP-7A2F 或内部登记号" style="font-family: ui-monospace, monospace;">
@@ -581,7 +592,7 @@ HTML_TEMPLATE = """
                                     <option value="START">扩容（正向会话）</option>
                                     <option value="TERMINATE">缩容（反向会话）</option>
                                 </select>
-                                <small class="text-muted d-block mt-1">仅 U1 模板需选择；U2 模板将忽略此项</small>
+                                <small class="text-muted d-block mt-1">U1 必选；U2 若填写下方「目标仓位%」则必选（表示买/卖方向）</small>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label mb-2">并发会话上限</label>
@@ -592,15 +603,17 @@ HTML_TEMPLATE = """
                                 <small class="text-muted">取值范围 1–1000</small>
                             </div>
                         </div>
+                        </div>
                         <div class="row g-3 mb-3">
                             <div class="col-md-6">
                                 <label class="form-label mb-2">会话模板</label>
                                 <select id="signal_profile" class="form-select">
                                     <option value="ORDER">U1 · 带向会话</option>
                                     <option value="TARGET">U2 · 目标位会话</option>
+                                    <option value="UI_READ">U0 · 柜台面板 OCR</option>
                                 </select>
                             </div>
-                            <div class="col-md-6">
+                            <div class="col-md-6" id="quoteStyleCol">
                                 <label class="form-label mb-2">定价模式</label>
                                 <select id="quote_style" class="form-select" onchange="toggleLimitRow()">
                                     <option value="MARKET">T1 · 即时</option>
@@ -608,10 +621,32 @@ HTML_TEMPLATE = """
                                 </select>
                             </div>
                         </div>
+                        <div id="uiReadDispatchFields" class="mb-3 border rounded p-3" style="display:none;background:#f8fafc;border-color:#e2e8f0!important;">
+                            <label class="form-label mb-2"><i class="fas fa-camera me-1"></i>读取底栏面板（委托 / 成交 / 资金 / 持仓）</label>
+                            <select id="ui_read_panel" class="form-select mb-2">
+                                <option value="orders">委托</option>
+                                <option value="trades">成交</option>
+                                <option value="funds">资金</option>
+                                <option value="positions">持仓</option>
+                            </select>
+                            <div class="d-flex flex-wrap gap-2 mb-2">
+                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="submitUiRead('orders')">仅发：委托</button>
+                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="submitUiRead('trades')">仅发：成交</button>
+                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="submitUiRead('funds')">仅发：资金</button>
+                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="submitUiRead('positions')">仅发：持仓</button>
+                            </div>
+                            <small class="text-muted">与下方「提交」相同：写入接入平面后由本机 EMS 点对应 Tab、截图 OCR，结果在明细中的「面板 OCR 全文」查看；成功后可刷新列表看状态。</small>
+                            <small class="text-danger d-block mt-2" style="font-size:0.8rem;">① 仍提示旧句「TARGET 或 ORDER」= 18080 上跑的仍是旧 <code>signal_ingest</code> 或连错实例；请访问云 <code>/health</code> 看 <code>signal_schema_version</code> 是否为 <strong>2</strong>。② 部署新版 <code>api_server</code> 后，同类校验失败会在句末附带 <code>| ingest_file=...</code> 路径，按路径核对服务器上到底是不是你改的那份文件。③ 若暂时修不好云接口：在本机能连 MySQL 的前提下，启动指挥部前设环境变量 <code>EMS_UI_READ_INSERT_MODE=direct</code>，并保证 <code>src/config.py</code> 里 <code>DB_CONFIG</code> 指向同一库，则 U0 面板查询会<strong>绕过云</strong>直接 <code>insert_signal</code>。</small>
+                        </div>
                         <div class="mb-3" id="limitPriceRow" style="display: none;">
                             <label class="form-label mb-2">预约阈值</label>
                             <input type="number" id="limit_anchor" class="form-control" step="0.001" min="0" placeholder="数值 &gt; 0">
                             <small class="text-muted">选用 T2 时必填，由接入平面落库解析</small>
+                        </div>
+                        <div class="mb-3" id="u2WeightPctRow" style="display: none;">
+                            <label class="form-label mb-2">目标仓位 %（仅 U2 选填）</label>
+                            <input type="number" id="u2_weight_pct" class="form-control" step="0.01" min="0" max="100" placeholder="留空则仍按「目标股数差」调仓（读持仓）">
+                            <small class="text-muted">填写 1–100 时下发 quantity_mode=TARGET_PCT，RPA 走「持仓比例」；须同时选左侧扩容/缩容表示买或卖</small>
                         </div>
                         
                         <button class="btn btn-primary w-100 py-2" onclick="doOrder()">
@@ -631,7 +666,7 @@ HTML_TEMPLATE = """
                                     <i class="fas fa-folder-open"></i>
                                 </button>
                             </div>
-                            <small class="text-muted">单文件 ≤10MB；列名支持 code/vol、target_hash/threads、operation、signal_type、price_type、limit_price 等（与平面约定一致）。</small>
+                            <small class="text-muted">单文件 ≤10MB；列名支持 code/vol、target_hash/threads、operation、signal_type、price_type、limit_price、quantity_mode、weight_pct、action 等。</small>
                         </div>
                         <button class="btn btn-success w-100 py-2" onclick="uploadCSV()">
                             <i class="fas fa-cloud-upload-alt me-2"></i>上传并下发
@@ -1029,11 +1064,15 @@ function renderTable(data) {
         const s_timestamp = s.timestamp;
         
         let display_op = '--';
-        if (s.dispatch_mode === 'INC' || s.action === 'BUY') display_op = '扩容';
+        const stUp = String(s.signal_type || '').toUpperCase();
+        if (stUp === 'UI_READ') {
+            const pn = s.ui_panel ? String(s.ui_panel) : '';
+            display_op = pn ? ('面板·' + pn) : '面板OCR';
+        } else if (s.dispatch_mode === 'INC' || s.action === 'BUY') display_op = '扩容';
         else if (s.dispatch_mode === 'DEC' || s.action === 'SELL') display_op = '缩容';
         else if (s.dispatch_mode && s.dispatch_mode !== '—') display_op = s.dispatch_mode;
-        const op_color = display_op === '扩容' ? '#2563eb' : '#0d9488';
-        const op_icon = display_op === '扩容' ? '▸' : '▿';
+        const op_color = display_op === '扩容' ? '#2563eb' : (String(display_op).indexOf('面板') >= 0 ? '#7c3aed' : '#0d9488');
+        const op_icon = display_op === '扩容' ? '▸' : (String(display_op).indexOf('面板') >= 0 ? '◆' : '▿');
         
         const badgeClass = getStatusBadge(s_status);
         const statusText = getStatusText(s_status);
@@ -1073,7 +1112,11 @@ function showDetailByIndex(index) {
     const s_status = item.status || 'UNKNOWN';
     const statusText = getStatusText(s_status);
     let display_op = '--';
-    if (item.dispatch_mode === 'INC' || item.action === 'BUY') display_op = '扩容';
+    const stItem = String(item.signal_type || '').toUpperCase();
+    if (stItem === 'UI_READ') {
+        const pn2 = item.ui_panel ? String(item.ui_panel) : '';
+        display_op = pn2 ? ('面板·' + pn2) : '面板OCR';
+    } else if (item.dispatch_mode === 'INC' || item.action === 'BUY') display_op = '扩容';
     else if (item.dispatch_mode === 'DEC' || item.action === 'SELL') display_op = '缩容';
     else if (item.dispatch_mode && item.dispatch_mode !== '—') display_op = item.dispatch_mode;
     const eventTag = String(item.event_tag || 'ORDER').trim() || 'ORDER';
@@ -1091,6 +1134,8 @@ function showDetailByIndex(index) {
     document.getElementById('detailPriceType').textContent = '—';
     document.getElementById('detailLimitPx').textContent = '—';
     document.getElementById('detailTime').textContent = formatTimestamp(s_timestamp);
+    document.getElementById('detailUiPanel').textContent = '—';
+    document.getElementById('detailUiOcr').textContent = '—';
 
     const pwd = window.prompt('请输入审计口令以查看敏感字段');
     if (pwd === null) {
@@ -1118,6 +1163,10 @@ function showDetailByIndex(index) {
         const act = String(detail.action || '').toUpperCase();
         document.getElementById('detailAction').textContent =
             act === 'BUY' ? '扩容' : (act === 'SELL' ? '缩容' : (detail.action || '--'));
+        document.getElementById('detailUiPanel').textContent =
+            detail.ui_panel != null && String(detail.ui_panel).trim() !== '' ? String(detail.ui_panel) : '—';
+        document.getElementById('detailUiOcr').textContent =
+            detail.ui_ocr_text != null && String(detail.ui_ocr_text).trim() !== '' ? String(detail.ui_ocr_text) : '—';
 
         const modalEl = document.getElementById('taskDetailModal');
         if (window.bootstrap && window.bootstrap.Modal) {
@@ -1185,7 +1234,43 @@ function toggleLimitRow() {
     row.style.display = sel.value === 'LIMIT' ? 'block' : 'none';
 }
 
+function submitUiRead(panel) {
+    const sel = document.getElementById('ui_read_panel');
+    if (sel && panel) sel.value = panel;
+    document.getElementById('signal_profile').value = 'UI_READ';
+    syncProfileUi();
+    doOrder();
+}
+
 function doOrder() {
+    const signalProfile = document.getElementById('signal_profile').value;
+
+    if (signalProfile === 'UI_READ') {
+        const panel = document.getElementById('ui_read_panel').value;
+        showLoading();
+        fetch('/send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ signal_profile: 'UI_READ', ui_panel: panel })
+        })
+        .then(res => res.json())
+        .then(res => {
+            hideLoading();
+            if (res.ok) {
+                showToast(`面板查询已下发，流水号：${res.signal_id}（EMS 执行后看明细 OCR）`);
+                refreshList();
+            } else {
+                const err = res.error || '未知错误';
+                showToast(`接入平面拒绝（云 api 返回）：${err}`, false);
+            }
+        })
+        .catch(err => {
+            hideLoading();
+            showToast(`网络异常：${err.message}`, false);
+        });
+        return;
+    }
+
     const targetHash = document.getElementById('target_hash').value.trim().toUpperCase();
     if (!targetHash) {
         showToast('请填写接入主体指纹', false);
@@ -1198,7 +1283,6 @@ function doOrder() {
         return;
     }
 
-    const signalProfile = document.getElementById('signal_profile').value;
     const quoteStyle = document.getElementById('quote_style').value;
     let limitAnchor = null;
     if (quoteStyle === 'LIMIT') {
@@ -1209,6 +1293,16 @@ function doOrder() {
             return;
         }
         limitAnchor = lp;
+    }
+
+    const wPctEl = document.getElementById('u2_weight_pct');
+    const wPctRaw = wPctEl ? wPctEl.value.trim() : '';
+    if (signalProfile === 'TARGET' && wPctRaw) {
+        const w = parseFloat(wPctRaw);
+        if (isNaN(w) || w <= 0 || w > 100) {
+            showToast('目标仓位% 须在 1–100 之间', false);
+            return;
+        }
     }
     
     showLoading();
@@ -1224,6 +1318,9 @@ function doOrder() {
     if (limitAnchor !== null) {
         data.limit_anchor = limitAnchor;
     }
+    if (signalProfile === 'TARGET' && wPctRaw) {
+        data.weight_pct = parseFloat(wPctRaw);
+    }
     
     fetch('/send', {
         method: 'POST',
@@ -1238,7 +1335,8 @@ function doOrder() {
             document.getElementById('target_hash').value = '';
             refreshList();
         } else {
-            showToast(`执行失败：${res.error || '未知错误'}`, false);
+            const err = res.error || '未知错误';
+            showToast(`接入平面拒绝（云 api 返回）：${err}`, false);
         }
     })
     .catch(err => {
@@ -1318,12 +1416,36 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     
     toggleLimitRow();
-    document.getElementById('signal_profile').addEventListener('change', function () {
-        const op = document.getElementById('operation');
+    function syncProfileUi() {
         const sp = document.getElementById('signal_profile').value;
-        if (op) op.disabled = (sp === 'TARGET');
-    });
-    document.getElementById('signal_profile').dispatchEvent(new Event('change'));
+        const op = document.getElementById('operation');
+        const pctRow = document.getElementById('u2WeightPctRow');
+        const pctEl = document.getElementById('u2_weight_pct');
+        const hasPct = pctEl && String(pctEl.value || '').trim() !== '';
+        const std = document.getElementById('standardDispatchFields');
+        const uiBlk = document.getElementById('uiReadDispatchFields');
+        const qCol = document.getElementById('quoteStyleCol');
+        const limRow = document.getElementById('limitPriceRow');
+        if (sp === 'UI_READ') {
+            if (std) std.style.display = 'none';
+            if (uiBlk) uiBlk.style.display = 'block';
+            if (qCol) qCol.style.display = 'none';
+            if (limRow) limRow.style.display = 'none';
+            if (pctRow) pctRow.style.display = 'none';
+            if (op) op.disabled = false;
+        } else {
+            if (std) std.style.display = 'block';
+            if (uiBlk) uiBlk.style.display = 'none';
+            if (qCol) qCol.style.display = 'block';
+            toggleLimitRow();
+            if (pctRow) pctRow.style.display = sp === 'TARGET' ? 'block' : 'none';
+            if (op) op.disabled = (sp === 'TARGET' && !hasPct);
+        }
+    }
+    document.getElementById('signal_profile').addEventListener('change', syncProfileUi);
+    const u2PctInput = document.getElementById('u2_weight_pct');
+    if (u2PctInput) u2PctInput.addEventListener('input', syncProfileUi);
+    syncProfileUi();
     
     // 设置初始时间
     const now = new Date();
@@ -1419,6 +1541,8 @@ def list_signals():
                     "signal_type": item.get('signal_type') or 'ORDER',
                     "price_type": item.get('price_type') or 'MARKET',
                     "limit_price": item.get('limit_price'),
+                    "ui_panel": item.get('ui_panel'),
+                    "ui_ocr_text": item.get('ui_ocr_text'),
                 }
 
         def status_of(item):
@@ -1453,14 +1577,16 @@ def list_signals():
             items.append({
                 "signal_id": detail_key or '-',
                 "status": x.get('status') or 'UNKNOWN',
+                "signal_type": st,
+                "ui_panel": x.get("ui_panel"),
                 # 列表接口不返回真实 action / 业务类型明文，降低抓包可读性；明细仍走 /detail + 密码
                 "dispatch_mode": "INC" if act == "BUY" else ("DEC" if act == "SELL" else "—"),
                 "event_tag": x.get('event_tag') or x.get('tag') or x.get('message') or x.get('reason') or 'ORDER',
                 "timestamp": x.get('timestamp') or x.get('created_at') or x.get('time'),
                 "node_alias": to_node_alias(raw_code),
                 "detail_key": detail_key,
-                "profile_tier": "U1" if st == "ORDER" else "U2",
-                "pricing_tier": "T1" if pt == "MARKET" else "T2",
+                "profile_tier": "U0" if st == "UI_READ" else ("U1" if st == "ORDER" else "U2"),
+                "pricing_tier": "—" if st == "UI_READ" else ("T1" if pt == "MARKET" else "T2"),
             })
 
         success_cnt = sum(1 for x in all_items if status_of(x) in ('SUCCESS', 'COMPLETED', 'EXECUTED'))
@@ -1525,17 +1651,75 @@ def get_detail(detail_key):
 
     return jsonify({"ok": True, "data": detail})
 
+def _commander_canonical_ui_panel(raw: str):
+    """与 src.signal_ingest.canonical_ui_panel 对齐（指挥部不依赖 import src）。"""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    key = s.lower() if s.isascii() else s
+    m = {
+        "orders": "orders", "order": "orders", "entrust": "orders", "entrusts": "orders", "委托": "orders",
+        "trades": "trades", "trade": "trades", "fills": "trades", "成交": "trades",
+        "funds": "funds", "fund": "funds", "capital": "funds", "资金": "funds", "资产": "funds",
+        "positions": "positions", "position": "positions", "holdings": "positions", "持仓": "positions",
+    }
+    return m.get(key) or m.get(s)
+
+
 @app.route('/send', methods=['POST'])
 def send_one():
     fake_data = request.json or {}
 
     # ================= 映射为服务端 normalize_signal 所需字段 =================
     st = str(fake_data.get("signal_profile") or "ORDER").strip().upper()
-    if st not in ("ORDER", "TARGET"):
+    if st not in ("ORDER", "TARGET", "UI_READ"):
         st = "ORDER"
     pt = str(fake_data.get("quote_style") or "MARKET").strip().upper()
     if pt not in ("MARKET", "LIMIT"):
         pt = "MARKET"
+
+    if st == "UI_READ":
+        panel_raw = str(
+            fake_data.get("ui_panel")
+            or fake_data.get("panel")
+            or fake_data.get("resource_pool")
+            or ""
+        ).strip()
+        ui_panel = _commander_canonical_ui_panel(panel_raw)
+        if not ui_panel:
+            return jsonify(
+                {"ok": False, "error": "UI_READ 须传 ui_panel（或 panel）：orders/委托、trades/成交、funds/资金、positions/持仓"}
+            ), 400
+        real_data = {
+            "stock_code": "000000.SZ",
+            "signal_type": "UI_READ",
+            "ui_panel": ui_panel,
+        }
+        mode = os.environ.get("EMS_UI_READ_INSERT_MODE", "").strip().lower()
+        if mode in ("direct", "local", "1", "true", "yes"):
+            try:
+                from sqlalchemy import create_engine
+
+                from src.config import DB_CONFIG
+                from src.core.repository import SignalRepository
+                from src.signal_ingest import SignalValidationError as SVE
+                from src.signal_ingest import insert_signal
+
+                db_url = (
+                    f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
+                    f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?charset={DB_CONFIG['charset']}"
+                )
+                eng = create_engine(db_url, pool_pre_ping=True, future=True)
+                sid = insert_signal(SignalRepository(eng), real_data)
+                return jsonify({"ok": True, "signal_id": sid, "ingest_mode": "direct_db"})
+            except SVE as e:
+                return jsonify({"ok": False, "error": f"本机直写库校验失败: {e}"}), 400
+            except Exception as e:
+                return jsonify(
+                    {"ok": False, "error": f"本机直写库失败（检查 DB_CONFIG/网络/表结构）: {type(e).__name__}: {e}"}
+                ), 400
+
+        return jsonify(send_encrypted_signal_to_cloud(real_data, is_batch=False))
 
     real_code = str(fake_data.get("target_hash", "")).strip().upper()
     try:
@@ -1553,6 +1737,21 @@ def send_one():
         real_data["action"] = "BUY" if fake_data.get("operation") == "START" else "SELL"
     else:
         real_data["action"] = None
+
+    # U2：填写 weight_pct 时按「目标仓位%」下发，执行器走 TARGET_PCT + RPA 持仓比例；否则仍按目标股数差（须读持仓）
+    if st == "TARGET":
+        wp_raw = fake_data.get("weight_pct")
+        if wp_raw is not None and str(wp_raw).strip() != "":
+            try:
+                wpf = float(wp_raw)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "weight_pct 须为数字"}), 400
+            if wpf <= 0 or wpf > 100:
+                return jsonify({"ok": False, "error": "weight_pct 须在 (0, 100]"}), 400
+            real_data["quantity_mode"] = "TARGET_PCT"
+            real_data["weight_pct"] = wpf
+            real_data["action"] = "BUY" if fake_data.get("operation") == "START" else "SELL"
+            real_data["volume"] = 0
 
     if pt == "LIMIT":
         try:
@@ -1573,9 +1772,41 @@ def batch_send():
 
     real_batch_data = []
     for idx, (_, row) in enumerate(df.iterrows(), start=1):
-        st = str(_csv_cell(row, "signal_type") or "ORDER").strip().upper()
-        if st not in ("ORDER", "TARGET"):
+        st = str(
+            _csv_cell(row, "signal_type")
+            or _csv_cell(row, "signal_profile")
+            or "ORDER"
+        ).strip().upper()
+        if st not in ("ORDER", "TARGET", "UI_READ"):
             st = "ORDER"
+        if st == "UI_READ":
+            panel_raw = _csv_cell(row, "ui_panel") or _csv_cell(row, "panel")
+            if panel_raw is None or (isinstance(panel_raw, float) and pd.isna(panel_raw)):
+                return jsonify(
+                    {
+                        "success": 0,
+                        "fail": 0,
+                        "error": f"第 {idx} 行 signal_type=UI_READ 时必须提供 ui_panel 或 panel",
+                    }
+                ), 400
+            ui_panel = _commander_canonical_ui_panel(str(panel_raw).strip())
+            if not ui_panel:
+                return jsonify(
+                    {
+                        "success": 0,
+                        "fail": 0,
+                        "error": f"第 {idx} 行 ui_panel 无效（orders/委托、trades/成交、funds/资金、positions/持仓）",
+                    }
+                ), 400
+            real_batch_data.append(
+                {
+                    "stock_code": "000000.SZ",
+                    "signal_type": "UI_READ",
+                    "ui_panel": ui_panel,
+                }
+            )
+            continue
+
         pt = str(_csv_cell(row, "price_type") or "MARKET").strip().upper()
         if pt not in ("MARKET", "LIMIT"):
             pt = "MARKET"
@@ -1594,17 +1825,38 @@ def batch_send():
             return jsonify(
                 {"success": 0, "fail": 0, "error": f"第 {idx} 行缺少 code 或 target_hash"}
             ), 400
-        vol = _csv_cell(row, "vol") or _csv_cell(row, "threads")
-        if vol is None or (isinstance(vol, float) and pd.isna(vol)):
-            return jsonify(
-                {"success": 0, "fail": 0, "error": f"第 {idx} 行缺少 vol 或 threads"}
-            ), 400
-        try:
-            vol_i = int(vol)
-        except (TypeError, ValueError):
-            return jsonify(
-                {"success": 0, "fail": 0, "error": f"第 {idx} 行数量无效"}
-            ), 400
+
+        wp_c = _csv_cell(row, "weight_pct")
+        use_tgt_pct = (
+            st == "TARGET"
+            and wp_c is not None
+            and not (isinstance(wp_c, float) and pd.isna(wp_c))
+            and str(wp_c).strip() != ""
+        )
+        if use_tgt_pct:
+            try:
+                wpf = float(wp_c)
+            except (TypeError, ValueError):
+                return jsonify(
+                    {"success": 0, "fail": 0, "error": f"第 {idx} 行 weight_pct 无效"}
+                ), 400
+            if wpf <= 0 or wpf > 100:
+                return jsonify(
+                    {"success": 0, "fail": 0, "error": f"第 {idx} 行 weight_pct 须在 (0, 100]"}
+                ), 400
+            vol_i = 0
+        else:
+            vol = _csv_cell(row, "vol") or _csv_cell(row, "threads")
+            if vol is None or (isinstance(vol, float) and pd.isna(vol)):
+                return jsonify(
+                    {"success": 0, "fail": 0, "error": f"第 {idx} 行缺少 vol 或 threads"}
+                ), 400
+            try:
+                vol_i = int(vol)
+            except (TypeError, ValueError):
+                return jsonify(
+                    {"success": 0, "fail": 0, "error": f"第 {idx} 行数量无效"}
+                ), 400
 
         one = {
             "stock_code": str(code).strip().upper(),
@@ -1616,6 +1868,23 @@ def batch_send():
             one["action"] = real_action
         else:
             one["action"] = None
+
+        if use_tgt_pct:
+            a2 = _csv_cell(row, "action") or _csv_cell(row, "operation")
+            a2s = str(a2).strip().upper() if a2 is not None and not (
+                isinstance(a2, float) and pd.isna(a2)
+            ) else ""
+            if a2s not in ("BUY", "SELL", "START", "TERMINATE"):
+                return jsonify(
+                    {
+                        "success": 0,
+                        "fail": 0,
+                        "error": f"第 {idx} 行 TARGET+weight_pct 时必须提供 action（BUY/SELL）或 operation（START/TERMINATE）",
+                    }
+                ), 400
+            one["quantity_mode"] = "TARGET_PCT"
+            one["weight_pct"] = wpf
+            one["action"] = "BUY" if a2s in ("BUY", "START") else "SELL"
 
         if pt == "LIMIT":
             lp = _csv_cell(row, "limit_price")
