@@ -75,6 +75,10 @@ EMAIL_INGEST_CONFIG = {
 }
 
 # ---------- HTTP API（ems_commander / 外部发单连这里）----------
+# HMAC 单一真源：api_server 读 API_CONFIG；ems_commander 优先 import 此处，与仅拷贝单文件时的回退字面值保持一致。
+EMS_HMAC_KEY_ID_DEFAULT = "strategy01"
+EMS_HMAC_SECRET_DEFAULT = "Qwer!1234567"
+
 API_CONFIG = {
     # 监听地址；云上对外服务常用 0.0.0.0
     "host": "0.0.0.0",
@@ -82,12 +86,12 @@ API_CONFIG = {
     # 简单 token；与 commander 配置一致；关 HMAC 时仍建议填
     "token": "",
     # 允许访问 API 的客户端 IP 列表，本机测试须含 127.0.0.1
-    "ip_whitelist": ["114.255.150.162"],
+    "ip_whitelist": ["114.255.150.162","127.0.0.1"],
     # 是否校验 HMAC 签名
     "hmac_enabled": True,
-    # key_id -> secret，与发单方 strategy 配置一致
+    # key_id -> secret（由上方常量生成，勿与 ems_commander 分叉维护）
     "hmac_keys": {
-        "strategy01": "",
+        EMS_HMAC_KEY_ID_DEFAULT: EMS_HMAC_SECRET_DEFAULT,
     },
     # 请求时间戳允许偏差（秒）
     "max_skew_seconds": 300,
@@ -117,14 +121,28 @@ RPA_CONFIG = {
     "vlm_model": "deepseek-chat",
     # auto：无图走 OCR+文本；vision：需支持 image_url 的接口
     "vlm_chat_mode": "auto",
-    # Tesseract 语言包，如 chi_sim+eng
+    # Tesseract 语言：简体中文 + 英文（证券代码等）。必须安装 chi_sim.traineddata，
+    # 否则会静默回退 eng，识别结果会像随机英文字母。可用命令验证：tesseract --list-langs
     "vlm_tesseract_lang": "chi_sim+eng",
     # tesseract.exe 绝对路径；PATH 能找到则留空
     "vlm_tesseract_cmd": "",
     # OCR 前是否做预处理
     "vlm_tesseract_preprocess": True,
-    # Tesseract 额外参数
+    # Tesseract 额外参数（会与多策略里的 psm 合并；另见下方 -c 开关）
     "vlm_tesseract_config": "--oem 3 --psm 6",
+    # 追加到每条 tesseract config 后的原始片段（例如自定义 -c）
+    "vlm_tesseract_extra_args": "",
+    # True：加 -c preserve_interword_spaces=1，利于中英文混排间距（交易表格强烈建议开）
+    "vlm_tesseract_preserve_spaces": True,
+    # False：加 -c tessedit_do_invert=0（深色背景浅色字时可试 True 配合反色）
+    "vlm_tesseract_do_invert": False,
+    # 仅允许出现的字符（极长中文白名单慎用）；勿含空格，勿含「=」
+    "vlm_tesseract_char_whitelist": "",
+    # True：二值化前做 OpenCV 轻微纠斜（持仓/委托表常微歪，建议开）
+    "vlm_tesseract_preprocess_deskew": True,
+    # 将截图短边放大到至少该像素（None 表示沿用内置「过小则 2 倍」逻辑）
+    # 1200 经验值：交易表小字一般能从「11~14px」放大到 ~30px，明显提升识别率
+    "vlm_tesseract_preprocess_target_min_edge": 1200,
     # 下单前 OCR 字符数低于此可能不调 LLM
     "ai_verify_min_ocr_signal": 14,
     # 是否在下单前对 bbox_pre_trade 区域做截图校验（须配 bbox）
@@ -265,6 +283,12 @@ RPA_CONFIG = {
     # 持仓表截图前稳定等待秒数
     "positions_table_settle_sec": 0.5,
     # 单笔 RPA 任务总超时（秒）
+    # PyAutoGUI：True 会在「鼠标移到屏幕角触发 FailSafeException」急停。
+    # 改为 False 关闭：U0/下单等流程涉及左上侧坐标，频繁误触；如需重新启用请改回 True
+    # 或用环境变量 EMS_PYAUTOGUI_FAILSAFE=1（优先级高于此处）。
+    "pyautogui_fail_safe": False,
+    # 每次 pyautogui 操作后的额外停顿秒数（None 表示不改默认）
+    "pyautogui_pause_sec": None,
     "rpa_task_timeout_sec": 600,
     # 旧 Tab 流复位后等待（秒）
     "after_reset_wait_sec": 0.35,

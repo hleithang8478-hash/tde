@@ -100,3 +100,54 @@ def verify_signature(
         return False, "bad signature"
 
     return True, "ok"
+
+
+def verify_signature_body_candidates(
+    api_keys: Dict[str, str],
+    key_id: str,
+    signature: str,
+    method: str,
+    path: str,
+    ts: str,
+    nonce: str,
+    body_candidates: list[str],
+    max_skew_seconds: int,
+    replay_cache: ReplayCache,
+) -> Tuple[bool, str]:
+    """对多段候选 body 串行验 HMAC，任一命中后再做防重放（避免多次调用 verify_signature 时 replay 已被占用）。"""
+    if not key_id or key_id not in api_keys:
+        return False, "invalid key id"
+
+    if not signature:
+        return False, "missing signature"
+
+    if not ts.isdigit():
+        return False, "invalid ts"
+
+    now_ts = int(time.time())
+    req_ts = int(ts)
+    if abs(now_ts - req_ts) > max_skew_seconds:
+        return False, "timestamp expired"
+
+    if not nonce or len(nonce) < 8:
+        return False, "invalid nonce"
+
+    secret = api_keys[key_id]
+    matched = False
+    for body_text in body_candidates:
+        if body_text is None:
+            continue
+        msg = build_sign_message(method, path, ts, nonce, body_sha256(body_text))
+        expected = calc_hmac_sha256(secret, msg)
+        if hmac.compare_digest(expected, signature):
+            matched = True
+            break
+
+    if not matched:
+        return False, "bad signature"
+
+    replay_key = f"{key_id}:{ts}:{nonce}"
+    if replay_cache.seen_or_add(replay_key):
+        return False, "replay request"
+
+    return True, "ok"

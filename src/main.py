@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """主循环入口"""
 
+import logging
+import os
 import time
 import traceback
 from datetime import datetime
@@ -31,6 +33,18 @@ def create_db_engine():
 
 
 def main():
+    lvl = getattr(logging, str(os.environ.get("EMS_LOG_LEVEL", "INFO")).upper(), logging.INFO)
+    logging.basicConfig(
+        level=lvl,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
+    )
+    logging.getLogger(__name__).info(
+        "EMS_LOG_LEVEL=%s（DEBUG 可看 UI_READ 截图/OCR 细节）",
+        os.environ.get("EMS_LOG_LEVEL", "INFO"),
+    )
+
     engine = create_db_engine()
     repo = SignalRepository(engine)
     broker = RpaTradeAdapter()

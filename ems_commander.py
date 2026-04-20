@@ -16,6 +16,8 @@ if not LOG.handlers:
     _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     LOG.addHandler(_h)
 LOG.setLevel(logging.INFO)
+if os.environ.get("EMS_COMMANDER_LOG_DEBUG", "").strip().lower() in ("1", "true", "yes"):
+    LOG.setLevel(logging.DEBUG)
 
 # 保证可 import src.*（本机直写库等）
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -23,12 +25,17 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 # ================= 配置区 =================
-# 端口分工（勿混）：
-#   - 18080：策略/信号 HTTP 入口（本程序只连这里：拉列表、下发指令）。云端 api_server 对外监听此端口。
-#   - 3306：MySQL，只给云端服务连库用；本地指挥部不直连数据库，查到的列表是 18080 读库后返回的 JSON。
-# 云端 API 根地址（不含路径）；请求外形为遥测/心跳。
-CLOUD_API_BASE = "http://120.53.250.208:18080"
-# UI_READ 是否绕过云 api、直接用本机 src.config.DB_CONFIG 写库（仅当本机能连上 MySQL 时设环境变量 EMS_UI_READ_INSERT_MODE=direct）
+# ---------- 典型部署（与你环境一致）----------
+#   服务器：除本文件外的整仓（api_server、EMS、src、SQL、MySQL 等）；对外提供 18080 接入平面，EMS 轮询库里的 trade_signals。
+#   本地：往往只跑本文件 ems_commander（监察台）；浏览器只访问本机 Flask，由本机去 HTTP 请求下面的 CLOUD_API_BASE（服务器）。
+#   因此：U0 / 发单 / 列表 等行为**一律以服务器上实际监听的 api 为准**；本地不存在第二份「接入平面」除非你用 EMS_CLOUD_API_BASE 指到本机做联调。
+#
+# 接入平面根地址（不含路径）。可用环境变量 EMS_CLOUD_API_BASE 覆盖。
+# 若「监察台」与 api_server **在同一台 Windows 上**跑：务必设为 http://127.0.0.1:18080 ，
+# 否则本机进程去请求自己的公网 EIP 常 hairpin 超时，和脚本自检现象一致。
+#   PowerShell: $env:EMS_CLOUD_API_BASE="http://127.0.0.1:18080"
+CLOUD_API_BASE = (os.environ.get("EMS_CLOUD_API_BASE") or "http://120.53.250.208:18080").strip().rstrip("/")
+# UI_READ 直连库：环境变量 EMS_UI_READ_INSERT_MODE=direct，或 src.config.UI_READ_INSERT_VIA_DB_ONLY=True
 # 访问云端时是否使用系统代理（HTTP_PROXY 等）。仅当「直连云 IP 根本不通、必须走代理出网」时改为 True。
 CLOUD_TRUST_ENV_PROXY = False
 CLOUD_REQUEST_TIMEOUT = 15
@@ -40,8 +47,23 @@ PATH_TELEMETRY_CONFIG = "/v1/agent/telemetry/config"
 # 设备标识（仅出现在遥测 JSON 中，与交易无关；可自行改成固定 GUID）
 TELEMETRY_DEVICE_ID = "7c9e2b4a-1d8f-4e3c-9a62-b0f81e2d4c99"
 
-API_KEY = "strategy01"
-API_SECRET = "Qwer!1234567"
+# 与云端一致：优先与同仓 src.config 单一真源对齐；仅拷贝本单文件无 src 时用下方回退（须与服务器 config 相同）。
+try:
+    from src.config import EMS_HMAC_KEY_ID_DEFAULT, EMS_HMAC_SECRET_DEFAULT
+
+    _HMAC_KEY_FALLBACK = EMS_HMAC_KEY_ID_DEFAULT
+    _HMAC_SECRET_FALLBACK = EMS_HMAC_SECRET_DEFAULT
+except ImportError:
+    _HMAC_KEY_FALLBACK = "strategy01"
+    _HMAC_SECRET_FALLBACK = "Qwer!1234567"
+
+API_KEY = (os.environ.get("EMS_HMAC_KEY_ID") or _HMAC_KEY_FALLBACK).strip()
+API_SECRET = (os.environ.get("EMS_HMAC_SECRET") or _HMAC_SECRET_FALLBACK).strip()
+LOG.info(
+    "telemetry HMAC key_id=%s secret_len=%s（须与云端 GET /health?auth=1 里 hmac_diag.secret_len 一致）",
+    API_KEY,
+    len(API_SECRET),
+)
 
 # 必须和云端完全一致的密钥！
 ENCRYPTION_KEY = b'9T71nh6mIWjZIm96LKuYK3-u3AEv5RhiqPWEorKJRcQ='
@@ -113,6 +135,21 @@ def get_detail_key(item):
     return str(item.get('signal_id') or item.get('id') or item.get('job_id') or '')
 
 
+def _signal_id_sort_int(item):
+    """列表排序：优先按数值 signal_id 降序，使新任务落在首页。"""
+    if not isinstance(item, dict):
+        return 0
+    for k in ("signal_id", "id", "job_id"):
+        v = item.get(k)
+        if v is None:
+            continue
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 def _cloud_request(method, url, **kwargs):
     """统一云端请求：超时、是否走系统代理与日志。
 
@@ -162,9 +199,9 @@ def send_encrypted_signal_to_cloud(real_data, is_batch=False):
     sign_message = f"{method}\n{path}\n{timestamp}\n{nonce}\n{body_hash}"
     
     signature = hmac.new(
-        API_SECRET.encode(), 
-        sign_message.encode(), 
-        hashlib.sha256
+        API_SECRET.encode("utf-8"),
+        sign_message.encode("utf-8"),
+        hashlib.sha256,
     ).hexdigest()
     
     headers = {
@@ -635,8 +672,29 @@ HTML_TEMPLATE = """
                                 <button type="button" class="btn btn-sm btn-outline-primary" onclick="submitUiRead('funds')">仅发：资金</button>
                                 <button type="button" class="btn btn-sm btn-outline-primary" onclick="submitUiRead('positions')">仅发：持仓</button>
                             </div>
-                            <small class="text-muted">与下方「提交」相同：写入接入平面后由本机 EMS 点对应 Tab、截图 OCR，结果在明细中的「面板 OCR 全文」查看；成功后可刷新列表看状态。</small>
+                            <small class="text-muted">与下方「提交」相同：经 18080 写入接入平面后，由<strong>运行 EMS 的机器</strong>唤起交易客户端、点底栏 Tab；其中「持仓」对 <code>RPA_CONFIG.bbox_positions_table</code> 区域截图并 OCR，文本回写库后由本页与会话索引展示（与查询持仓股数用的是同一块表区域）。</small>
                             <small class="text-danger d-block mt-2" style="font-size:0.8rem;">① 仍提示旧句「TARGET 或 ORDER」= 18080 上跑的仍是旧 <code>signal_ingest</code> 或连错实例；请访问云 <code>/health</code> 看 <code>signal_schema_version</code> 是否为 <strong>2</strong>。② 部署新版 <code>api_server</code> 后，同类校验失败会在句末附带 <code>| ingest_file=...</code> 路径，按路径核对服务器上到底是不是你改的那份文件。③ 若暂时修不好云接口：在本机能连 MySQL 的前提下，启动指挥部前设环境变量 <code>EMS_UI_READ_INSERT_MODE=direct</code>，并保证 <code>src/config.py</code> 里 <code>DB_CONFIG</code> 指向同一库，则 U0 面板查询会<strong>绕过云</strong>直接 <code>insert_signal</code>。</small>
+                        </div>
+                        <div id="uiReadResultCard" class="card border-primary shadow-sm mt-3 mb-2" style="display:none;">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                <span><i class="fas fa-file-alt me-2"></i>U0 查询结果（OCR 全文）</span>
+                                <div class="d-flex gap-1">
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="copyUiReadOcr()" title="复制全文">复制</button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="stopUiReadPoll(); document.getElementById('uiReadResultCard').style.display='none';">收起</button>
+                                </div>
+                            </div>
+                            <div class="card-body py-2">
+                                <div class="d-flex flex-wrap gap-3 small mb-2">
+                                    <div><span class="text-muted">流水号</span> <code id="uiReadResSid">—</code></div>
+                                    <div><span class="text-muted">面板</span> <span id="uiReadResPanel">—</span></div>
+                                    <div><span class="text-muted">状态</span> <span id="uiReadResStatus" class="badge bg-secondary">—</span></div>
+                                </div>
+                                <div id="uiReadResErr" class="alert alert-danger py-1 px-2 small mb-2" style="display:none;"></div>
+                                <div id="uiReadDiagHint" class="alert alert-info py-2 small mb-2" style="display:none;white-space:pre-wrap;word-break:break-word;line-height:1.45;"></div>
+                                <label class="form-label small text-muted mb-1">识别全文</label>
+                                <pre id="uiReadResOcr" class="rounded border bg-light p-2 mb-0" style="max-height:360px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:0.78rem;line-height:1.35;">（下发 U0 后将显示 OCR；右侧表「OCR/摘要」为截断预览）</pre>
+                                <small class="text-muted d-block mt-2">下发成功后每 2.5s 自动拉取列表中的本条状态（与「定时刷新」共用同一接口）。<strong>截图与 OCR 在装交易软件并运行 EMS 的那台电脑执行</strong>，本页只读库里的结果。也可点击右侧会话索引中对应行同步到此处。若需更多后台日志：运行指挥部的终端会打 U0 受理行；设环境变量 <code>EMS_COMMANDER_LOG_DEBUG=1</code> 可打开 DEBUG（含每次列表拉取摘要）。</small>
+                            </div>
                         </div>
                         <div class="mb-3" id="limitPriceRow" style="display: none;">
                             <label class="form-label mb-2">预约阈值</label>
@@ -743,18 +801,19 @@ HTML_TEMPLATE = """
                         <table class="table table-hover mb-0">
                             <thead class="table-dark">
                                 <tr>
-                                    <th style="width: 15%;">流水号</th>
-                                    <th style="width: 22%;">端点指纹</th>
-                                    <th style="width: 16%;">策略向</th>
-                                    <th style="width: 16%;">会话状态</th>
-                                    <th style="width: 17%;">时间</th>
-                                    <th style="width: 12%;">路由标签</th>
-                                    <th style="width: 14%;">配置层</th>
+                                    <th style="width: 11%;">流水号</th>
+                                    <th style="width: 14%;">端点指纹</th>
+                                    <th style="width: 11%;">策略向</th>
+                                    <th style="width: 10%;">会话状态</th>
+                                    <th style="width: 22%;">OCR/摘要</th>
+                                    <th style="width: 10%;">时间</th>
+                                    <th style="width: 10%;">路由标签</th>
+                                    <th style="width: 10%;">配置层</th>
                                 </tr>
                             </thead>
                             <tbody id="signalList">
                                 <tr>
-                                    <td colspan="7" class="text-center py-5">
+                                    <td colspan="8" class="text-center py-5">
                                         <div class="text-muted">
                                             <i class="fas fa-inbox fa-2x mb-3"></i>
                                             <p>暂无会话记录，可先提交一条策略。</p>
@@ -832,6 +891,10 @@ let totalCount = 0;
 let lastData = [];
 let currentRenderedData = [];
 let pendingDetailKey = '';
+let uiReadPollTimer = null;
+let uiReadTrackedId = null;
+let uiReadPollStartedAt = null;
+let uiReadPollCount = 0;
 
 let metricState = {
     avgLatency: 26,
@@ -921,6 +984,8 @@ function getStatusBadge(status) {
         case 'PENDING':
         case 'WAITING':
             return 'bg-warning text-dark';
+        case 'PROCESSING':
+            return 'bg-info text-dark';
         case 'SUCCESS':
         case 'COMPLETED':
         case 'EXECUTED':
@@ -938,6 +1003,7 @@ function getStatusText(status) {
     const statusMap = {
         'PENDING': '待处理',
         'WAITING': '等待中',
+        'PROCESSING': '执行中',
         'SUCCESS': '成功', 
         'COMPLETED': '已完成',
         'EXECUTED': '已执行',
@@ -963,6 +1029,167 @@ function formatTimestamp(timestamp) {
         });
     } catch {
         return '--:--:--';
+    }
+}
+
+function escHtml(str) {
+    return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function setUiReadDiagBox(level, text) {
+    const el = document.getElementById('uiReadDiagHint');
+    if (!el) return;
+    if (!text) {
+        el.style.display = 'none';
+        el.textContent = '';
+        return;
+    }
+    const base = 'alert py-2 small mb-2';
+    if (level === 'danger') el.className = base + ' alert-danger';
+    else if (level === 'warning') el.className = base + ' alert-warning';
+    else el.className = base + ' alert-info';
+    el.style.whiteSpace = 'pre-wrap';
+    el.style.display = 'block';
+    el.textContent = text;
+}
+
+function refreshUiReadDiagnosis(row) {
+    const el = document.getElementById('uiReadDiagHint');
+    if (!el || !uiReadTrackedId) return;
+    const sid = String(uiReadTrackedId);
+    const elapsed = uiReadPollStartedAt != null
+        ? Math.max(0, Math.floor((Date.now() - uiReadPollStartedAt) / 1000))
+        : 0;
+    const st = row && row.status ? String(row.status).toUpperCase() : 'UNKNOWN';
+    const lines = [
+        '【说明】本页不跑 RPA：截图、OCR 在「运行 EMS + 柜台客户端」的机器上进行；此处仅同步数据库中的状态与文本。',
+        '流水号 ' + sid + ' · 状态 ' + getStatusText(st) + ' · 已轮询 ' + uiReadPollCount + ' 次 · 已等待约 ' + elapsed + ' s。',
+    ];
+    if (st === 'PENDING' || st === 'WAITING') {
+        lines.push('待处理含义：EMS 尚未把该条置为 SUCCESS，或未执行完。请到交易机查看 python main（或 EMS 服务）是否在跑，并查 MySQL trade_signals 中本条 status / last_error。');
+        if (elapsed >= 25) lines.push('若超过约半分钟仍为待处理：多半是 EMS 未连接同一数据库，或 Cloud API 未把信号写入 EMS 所用的库。');
+    } else if (st === 'PROCESSING') {
+        lines.push('执行中：通常表示 EMS 已领取任务，正在进行切 Tab / 截图 / OCR。');
+    } else if (st === 'SUCCESS') {
+        const raw = row && row.ui_ocr_text != null ? String(row.ui_ocr_text).trim() : '';
+        if (!raw) lines.push('已成功但 OCR 为空：可能被裁区无字或识别失败，请到交易机查 EMS / Tesseract 日志。');
+        else lines.push('识别文本已回填；若需审计全文可点会话明细（口令）。');
+    }
+    setUiReadDiagBox('info', lines.join('\\n'));
+}
+
+function fillUiReadResultCard(row) {
+    if (!row) return;
+    const sid = row.signal_id != null ? String(row.signal_id) : '—';
+    document.getElementById('uiReadResSid').textContent = sid;
+    document.getElementById('uiReadResPanel').textContent = row.ui_panel || '—';
+    const st = (row.status || 'UNKNOWN').toUpperCase();
+    const stEl = document.getElementById('uiReadResStatus');
+    stEl.textContent = getStatusText(st);
+    stEl.className = 'badge status-badge ' + getStatusBadge(st);
+    const errEl = document.getElementById('uiReadResErr');
+    const err = (row.last_error || '').trim();
+    if (err) {
+        errEl.style.display = 'block';
+        errEl.textContent = err;
+    } else {
+        errEl.style.display = 'none';
+        errEl.textContent = '';
+    }
+    const ocr = row.ui_ocr_text != null ? String(row.ui_ocr_text) : '';
+    const pre = document.getElementById('uiReadResOcr');
+    if (ocr.trim()) {
+        pre.textContent = ocr;
+    } else {
+        pre.textContent = '（暂无识别文本；待处理时请等待 EMS 执行；若失败请查看上方错误说明）';
+    }
+    refreshUiReadDiagnosis(row);
+}
+
+function stopUiReadPoll() {
+    if (uiReadPollTimer) {
+        clearInterval(uiReadPollTimer);
+        uiReadPollTimer = null;
+    }
+}
+
+function pollUiReadOnce() {
+    if (!uiReadTrackedId) return;
+    uiReadPollCount += 1;
+    fetch('/list?page=1&page_size=500&filter=all')
+        .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function (payload) {
+            const meta = payload.meta || {};
+            if (meta.upstream_ok === false) {
+                setUiReadDiagBox(
+                    'warning',
+                    '列表接口：接入平面不可用 — ' + (meta.upstream_msg || '未知') + '\\n请检查 CLOUD_API_BASE / 18080 与本机网络。'
+                );
+                console.warn('[ems U0 poll] upstream fail', meta);
+                return;
+            }
+            const items = payload.items || [];
+            const row = items.find(function (it) { return String(it.signal_id) === String(uiReadTrackedId); });
+            if (!row) {
+                const total = payload.total != null ? payload.total : items.length;
+                setUiReadDiagBox(
+                    'warning',
+                    '本轮列表第 1 页未找到流水号 ' + uiReadTrackedId + '（本页 ' + items.length + ' 条，过滤后合计约 ' + total + ' 条）。\\n请点击右侧会话索引中含该流水号的一行以同步；若仍没有，确认接入平面返回里是否包含该 signal_id。'
+                );
+                console.warn('[ems U0 poll] sid not in page', uiReadTrackedId, 'items_len=', items.length);
+                return;
+            }
+            fillUiReadResultCard(row);
+            const st = (row.status || '').toUpperCase();
+            const hasOcr = (row.ui_ocr_text || '').trim().length > 0;
+            if (st === 'SUCCESS') stopUiReadPoll();
+            if (['FAILED', 'ERROR', 'REJECTED'].indexOf(st) >= 0) stopUiReadPoll();
+            if (st === 'SUCCESS' && !hasOcr) console.info('[ems U0 poll] SUCCESS but empty OCR');
+        })
+        .catch(function (err) {
+            var msg = err && err.message ? err.message : String(err);
+            setUiReadDiagBox('danger', '轮询 /list 失败：' + msg + '\\n请打开浏览器控制台 (F12) 查看 Network。');
+            console.error('[ems U0 poll]', err);
+        });
+}
+
+function startUiReadPoll() {
+    stopUiReadPoll();
+    if (!uiReadTrackedId) return;
+    uiReadPollStartedAt = Date.now();
+    uiReadPollCount = 0;
+    pollUiReadOnce();
+    uiReadPollTimer = setInterval(pollUiReadOnce, 2500);
+}
+
+function syncUiReadPanelFromList() {
+    if (!uiReadTrackedId || !lastData || !lastData.length) return;
+    const row = lastData.find(function (it) { return String(it.signal_id) === String(uiReadTrackedId); });
+    if (row) fillUiReadResultCard(row);
+}
+
+function copyUiReadOcr() {
+    const pre = document.getElementById('uiReadResOcr');
+    const s = pre ? pre.textContent : '';
+    if (!s || s.indexOf('（暂无识别文本') === 0 || s.indexOf('（暂无识别') === 0) {
+        showToast('暂无可复制的 OCR 内容', false);
+        return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(s).then(function () {
+            showToast('已复制 OCR 全文');
+        }).catch(function () {
+            showToast('复制失败', false);
+        });
+    } else {
+        showToast('浏览器不支持剪贴板 API', false);
     }
 }
 
@@ -1016,6 +1243,7 @@ function refreshList(silent) {
             }
             renderTable(data);
             updatePaginationUI();
+            syncUiReadPanelFromList();
             if (!quiet) hideLoading();
         })
         .catch(function (err) {
@@ -1035,7 +1263,7 @@ function renderTable(data) {
         currentRenderedData = [];
         tbody.innerHTML = `
             <tr>
-                <td colspan="7" class="text-center py-5">
+                <td colspan="8" class="text-center py-5">
                     <div class="text-muted">
                         <i class="fas fa-inbox fa-2x mb-3"></i>
                         <p>暂无任务记录，可先发起一次调度。</p>
@@ -1088,12 +1316,28 @@ function renderTable(data) {
         const rtier = s.pricing_tier || (ptFallback === 'LIMIT' ? 'T2' : 'T1');
         const kindPrice = ptier + ' · ' + rtier;
 
+        let ocrCell = '<small class="text-muted">—</small>';
+        if (stUp === 'UI_READ') {
+            const raw = (s.ui_ocr_text !== undefined && s.ui_ocr_text !== null) ? String(s.ui_ocr_text) : '';
+            const err = (s.last_error || '').trim();
+            if (err && (!raw.trim() || ['FAILED', 'ERROR', 'REJECTED'].indexOf((s_status || '').toUpperCase()) >= 0)) {
+                const shortErr = err.length > 100 ? err.substring(0, 100) + '…' : err;
+                ocrCell = '<span class="text-danger small" title="' + escHtml(err) + '">' + escHtml(shortErr) + '</span>';
+            } else if (raw.trim()) {
+                const ex = raw.length > 120 ? raw.substring(0, 120) + '…' : raw;
+                ocrCell = '<small class="text-body d-block" style="font-family:ui-monospace,monospace;font-size:0.7rem;line-height:1.25;max-height:3.2rem;overflow:hidden;" title="' + escHtml(raw) + '">' + escHtml(ex) + '</small>';
+            } else {
+                ocrCell = '<small class="text-muted">待识别</small>';
+            }
+        }
+
         html += `
             <tr class="row-clickable" onclick="showDetailByIndex(${idx})">
                 <td><code class="text-info">${shortId}</code></td>
                 <td style="font-family: ui-monospace, monospace; font-weight: 600; color:#0f172a;">${nodeName}</td>
                 <td><span style="color:${op_color}; font-weight:bold;">${op_icon} ${display_op}</span></td>
                 <td><span class="badge ${badgeClass} status-badge">${statusText}</span></td>
+                <td style="max-width:14rem;vertical-align:top;">${ocrCell}</td>
                 <td><small class="text-muted">${formatTimestamp(s_timestamp)}</small></td>
                 <td><span class="event-tag" title="${eventTag}">${eventTag}</span></td>
                 <td><small class="text-muted" title="${kindPrice}">${kindPrice}</small></td>
@@ -1123,6 +1367,17 @@ function showDetailByIndex(index) {
     const s_timestamp = item.timestamp;
 
     pendingDetailKey = String(item.detail_key || s_id || '');
+
+    if (stItem === 'UI_READ') {
+        const urCard = document.getElementById('uiReadResultCard');
+        if (urCard) {
+            urCard.style.display = 'block';
+        }
+        const spEl = document.getElementById('signal_profile');
+        if (spEl) spEl.value = 'UI_READ';
+        syncProfileUi();
+        fillUiReadResultCard(item);
+    }
 
     document.getElementById('detailJobId').textContent = String(s_id);
     document.getElementById('detailNodeAlias').textContent = nodeAlias;
@@ -1234,6 +1489,39 @@ function toggleLimitRow() {
     row.style.display = sel.value === 'LIMIT' ? 'block' : 'none';
 }
 
+function syncProfileUi() {
+    const spEl = document.getElementById('signal_profile');
+    if (!spEl) return;
+    const sp = spEl.value;
+    const op = document.getElementById('operation');
+    const pctRow = document.getElementById('u2WeightPctRow');
+    const pctEl = document.getElementById('u2_weight_pct');
+    const hasPct = pctEl && String(pctEl.value || '').trim() !== '';
+    const std = document.getElementById('standardDispatchFields');
+    const uiBlk = document.getElementById('uiReadDispatchFields');
+    const qCol = document.getElementById('quoteStyleCol');
+    const limRow = document.getElementById('limitPriceRow');
+    const urCard = document.getElementById('uiReadResultCard');
+    if (sp === 'UI_READ') {
+        if (std) std.style.display = 'none';
+        if (uiBlk) uiBlk.style.display = 'block';
+        if (qCol) qCol.style.display = 'none';
+        if (limRow) limRow.style.display = 'none';
+        if (pctRow) pctRow.style.display = 'none';
+        if (op) op.disabled = false;
+        if (urCard) urCard.style.display = 'block';
+    } else {
+        if (std) std.style.display = 'block';
+        if (uiBlk) uiBlk.style.display = 'none';
+        if (qCol) qCol.style.display = 'block';
+        toggleLimitRow();
+        if (pctRow) pctRow.style.display = sp === 'TARGET' ? 'block' : 'none';
+        if (op) op.disabled = (sp === 'TARGET' && !hasPct);
+        if (urCard) urCard.style.display = 'none';
+        stopUiReadPoll();
+    }
+}
+
 function submitUiRead(panel) {
     const sel = document.getElementById('ui_read_panel');
     if (sel && panel) sel.value = panel;
@@ -1257,7 +1545,18 @@ function doOrder() {
         .then(res => {
             hideLoading();
             if (res.ok) {
-                showToast(`面板查询已下发，流水号：${res.signal_id}（EMS 执行后看明细 OCR）`);
+                showToast(`面板查询已下发，流水号：${res.signal_id}；左侧「U0 查询结果」将自动刷新 OCR`);
+                uiReadTrackedId = res.signal_id != null ? String(res.signal_id) : null;
+                const urCard = document.getElementById('uiReadResultCard');
+                if (urCard) urCard.style.display = 'block';
+                fillUiReadResultCard({
+                    signal_id: uiReadTrackedId,
+                    status: 'PENDING',
+                    ui_panel: panel,
+                    ui_ocr_text: '',
+                    last_error: ''
+                });
+                startUiReadPoll();
                 refreshList();
             } else {
                 const err = res.error || '未知错误';
@@ -1416,32 +1715,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     
     toggleLimitRow();
-    function syncProfileUi() {
-        const sp = document.getElementById('signal_profile').value;
-        const op = document.getElementById('operation');
-        const pctRow = document.getElementById('u2WeightPctRow');
-        const pctEl = document.getElementById('u2_weight_pct');
-        const hasPct = pctEl && String(pctEl.value || '').trim() !== '';
-        const std = document.getElementById('standardDispatchFields');
-        const uiBlk = document.getElementById('uiReadDispatchFields');
-        const qCol = document.getElementById('quoteStyleCol');
-        const limRow = document.getElementById('limitPriceRow');
-        if (sp === 'UI_READ') {
-            if (std) std.style.display = 'none';
-            if (uiBlk) uiBlk.style.display = 'block';
-            if (qCol) qCol.style.display = 'none';
-            if (limRow) limRow.style.display = 'none';
-            if (pctRow) pctRow.style.display = 'none';
-            if (op) op.disabled = false;
-        } else {
-            if (std) std.style.display = 'block';
-            if (uiBlk) uiBlk.style.display = 'none';
-            if (qCol) qCol.style.display = 'block';
-            toggleLimitRow();
-            if (pctRow) pctRow.style.display = sp === 'TARGET' ? 'block' : 'none';
-            if (op) op.disabled = (sp === 'TARGET' && !hasPct);
-        }
-    }
     document.getElementById('signal_profile').addEventListener('change', syncProfileUi);
     const u2PctInput = document.getElementById('u2_weight_pct');
     if (u2PctInput) u2PctInput.addEventListener('input', syncProfileUi);
@@ -1483,7 +1756,7 @@ def list_signals():
         page = 1
     if page_size < 1:
         page_size = 20
-    page_size = min(page_size, 200)
+    page_size = min(page_size, 500)
 
     pull_url = CLOUD_API_BASE + PATH_TELEMETRY_CONFIG
     hdrs = {
@@ -1543,6 +1816,7 @@ def list_signals():
                     "limit_price": item.get('limit_price'),
                     "ui_panel": item.get('ui_panel'),
                     "ui_ocr_text": item.get('ui_ocr_text'),
+                    "last_error": item.get("last_error"),
                 }
 
         def status_of(item):
@@ -1555,6 +1829,8 @@ def list_signals():
             filtered = [x for x in all_items if status_of(x) in ('SUCCESS', 'COMPLETED', 'EXECUTED')]
         elif status_filter == 'error':
             filtered = [x for x in all_items if status_of(x) in ('ERROR', 'FAILED', 'REJECTED')]
+
+        filtered = sorted(filtered, key=_signal_id_sort_int, reverse=True)
 
         total = len(filtered)
         total_pages = max(1, (total + page_size - 1) // page_size)
@@ -1579,6 +1855,8 @@ def list_signals():
                 "status": x.get('status') or 'UNKNOWN',
                 "signal_type": st,
                 "ui_panel": x.get("ui_panel"),
+                "ui_ocr_text": x.get("ui_ocr_text"),
+                "last_error": x.get("last_error"),
                 # 列表接口不返回真实 action / 业务类型明文，降低抓包可读性；明细仍走 /detail + 密码
                 "dispatch_mode": "INC" if act == "BUY" else ("DEC" if act == "SELL" else "—"),
                 "event_tag": x.get('event_tag') or x.get('tag') or x.get('message') or x.get('reason') or 'ORDER',
@@ -1593,6 +1871,14 @@ def list_signals():
         pending_cnt = sum(1 for x in all_items if status_of(x) in ('PENDING', 'WAITING'))
         error_cnt = sum(1 for x in all_items if status_of(x) in ('ERROR', 'FAILED', 'REJECTED'))
 
+        LOG.debug(
+            "列表拉取完成 filter=%s 原始条数=%s 过滤后=%s 本页=%s-%s",
+            status_filter,
+            len(all_items),
+            total,
+            start + 1,
+            end,
+        )
         return jsonify({
             "items": items,
             "page": page,
@@ -1711,6 +1997,11 @@ def send_one():
                 )
                 eng = create_engine(db_url, pool_pre_ping=True, future=True)
                 sid = insert_signal(SignalRepository(eng), real_data)
+                LOG.info(
+                    "U0 已入库 signal_id=%s ui_panel=%s ingest=direct_db（截图/OCR 由运行 EMS 的机器执行）",
+                    sid,
+                    ui_panel,
+                )
                 return jsonify({"ok": True, "signal_id": sid, "ingest_mode": "direct_db"})
             except SVE as e:
                 return jsonify({"ok": False, "error": f"本机直写库校验失败: {e}"}), 400
@@ -1719,7 +2010,19 @@ def send_one():
                     {"ok": False, "error": f"本机直写库失败（检查 DB_CONFIG/网络/表结构）: {type(e).__name__}: {e}"}
                 ), 400
 
-        return jsonify(send_encrypted_signal_to_cloud(real_data, is_batch=False))
+        cloud_res = send_encrypted_signal_to_cloud(real_data, is_batch=False)
+        if isinstance(cloud_res, dict):
+            LOG.info(
+                "U0 已提交接入平面 ui_panel=%s CLOUD_API_BASE=%s ok=%s signal_id=%s err=%s",
+                ui_panel,
+                CLOUD_API_BASE,
+                cloud_res.get("ok"),
+                cloud_res.get("signal_id"),
+                cloud_res.get("error"),
+            )
+        else:
+            LOG.warning("U0 接入平面返回非 dict 类型=%s", type(cloud_res).__name__)
+        return jsonify(cloud_res)
 
     real_code = str(fake_data.get("target_hash", "")).strip().upper()
     try:
@@ -1918,5 +2221,14 @@ def batch_send():
         return jsonify({"success": 0, "fail": len(real_batch_data), "error": res.get("error")})
 
 if __name__ == '__main__':
-    print("接入监察台：http://127.0.0.1:5000")
+    print("接入监察台：http://127.0.0.1:5000", flush=True)
+    print(
+        f"[ems_commander] 当前接入平面 CLOUD_API_BASE={CLOUD_API_BASE}",
+        "（要打本机 api_server 请先 set EMS_CLOUD_API_BASE=http://127.0.0.1:18080）",
+        flush=True,
+    )
+    print(
+        "[ems_commander] U0 / 列表详细日志：set EMS_COMMANDER_LOG_DEBUG=1（DEBUG，含列表分页摘要）",
+        flush=True,
+    )
     app.run(port=5000)

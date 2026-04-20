@@ -12,6 +12,8 @@ RPA 主控适配器：单线程 Worker + Queue 串行化所有 UI 操作，
 
 from __future__ import annotations
 
+import logging
+import os
 import queue
 import threading
 import time
@@ -28,6 +30,12 @@ from src.rpa import template_registry
 from src.rpa.rpa_config_manager import RpaConfigManager
 from src.rpa.vision_inspector import AiVisionInspector, _ocr_best_for_trade_panel
 from src.rpa.window_controller import WindowController
+
+_LOG = logging.getLogger(__name__)
+
+# _apply_pyautogui_runtime_settings 会在每个 RPA 任务前调用；下列标记避免「关闭 fail-safe」刷屏
+_pyautogui_fs_disable_logged = False
+_pyautogui_fs_force_on_logged = False
 
 
 def _cfg() -> dict[str, Any]:
@@ -54,6 +62,53 @@ def _save_fullscreen_png() -> str:
         return ""
 
 
+def _apply_pyautogui_runtime_settings(cfg: dict[str, Any]) -> None:
+    """
+    与 RPA_CONFIG 同步 PyAutoGUI。
+    FAILSAFE：鼠标移到屏幕角区会抛 FailSafeException；RPA 点击路径经过角区或误触时可设
+    ``pyautogui_fail_safe`` 为 False，或设环境变量 ``EMS_PYAUTOGUI_FAILSAFE=0``（不推荐，脚本失控时无法用角区急停）。
+    """
+    global _pyautogui_fs_disable_logged, _pyautogui_fs_force_on_logged
+    try:
+        import pyautogui  # type: ignore
+    except Exception:
+        return
+    try:
+        raw_pause = cfg.get("pyautogui_pause_sec")
+        if raw_pause is not None:
+            pyautogui.PAUSE = max(0.0, float(raw_pause))
+    except (TypeError, ValueError):
+        pass
+    # 环境变量优先，便于 NSSM / 一键脚本不写死配置：EMS_PYAUTOGUI_FAILSAFE=0|1|false|true
+    env_fs = (os.environ.get("EMS_PYAUTOGUI_FAILSAFE") or "").strip().lower()
+    if env_fs in ("0", "false", "no", "off"):
+        pyautogui.FAILSAFE = False
+        if not _pyautogui_fs_disable_logged:
+            _pyautogui_fs_disable_logged = True
+            _LOG.warning(
+                "环境变量 EMS_PYAUTOGUI_FAILSAFE=%s：已关闭 PyAutoGUI fail-safe（角区急停失效），仅此提示一次",
+                os.environ.get("EMS_PYAUTOGUI_FAILSAFE"),
+            )
+        return
+    if env_fs in ("1", "true", "yes", "on"):
+        pyautogui.FAILSAFE = True
+        if not _pyautogui_fs_force_on_logged:
+            _pyautogui_fs_force_on_logged = True
+            _LOG.info("环境变量 EMS_PYAUTOGUI_FAILSAFE：已强制开启 PyAutoGUI fail-safe（仅此提示一次）")
+        return
+
+    fs = cfg.get("pyautogui_fail_safe")
+    if fs is False:
+        pyautogui.FAILSAFE = False
+        if not _pyautogui_fs_disable_logged:
+            _pyautogui_fs_disable_logged = True
+            _LOG.warning(
+                "RPA_CONFIG pyautogui_fail_safe=False：已关闭 PyAutoGUI fail-safe（角区急停失效），仅此提示一次"
+            )
+    elif fs is True:
+        pyautogui.FAILSAFE = True
+
+
 def _dingtalk_alert(title: str, body: str, shot_path: str = "") -> None:
     url = (_cfg().get("dingtalk_webhook_url") or "").strip()
     if not url:
@@ -74,6 +129,7 @@ class RpaTradeAdapter:
 
     def __init__(self) -> None:
         self._cfg = _cfg()
+        _apply_pyautogui_runtime_settings(self._cfg)
         self._wc = WindowController(self._cfg)
         self._vi = AiVisionInspector(self._cfg)
         self._inp = RpaInputEngine(self._cfg)
@@ -96,6 +152,7 @@ class RpaTradeAdapter:
     def _refresh_components_cfg(self) -> None:
         """从 src.config 重新拉取 RPA_CONFIG，避免进程长驻时子模块持有旧字典。"""
         self._cfg = _cfg()
+        _apply_pyautogui_runtime_settings(self._cfg)
         self._wc._cfg = self._cfg
         self._vi._cfg = self._cfg
         self._inp._cfg = self._cfg
@@ -105,6 +162,8 @@ class RpaTradeAdapter:
         while True:
             fn, args, kw, fut = self._q.get()
             try:
+                # 兜底：每个任务执行前再次同步 PyAutoGUI 设置，防止其他模块导入时把 FAILSAFE 重置回 True。
+                _apply_pyautogui_runtime_settings(self._cfg)
                 res = fn(*args, **kw)
                 fut.set_result(res)
             except BaseException as e:  # noqa: BLE001
@@ -807,7 +866,7 @@ class RpaTradeAdapter:
             return 0
 
     def _capture_panel_ocr_text_impl(self, panel: str) -> str:
-        """Worker 内：点击底栏 Tab → 截取 panel_content_bbox → 多策略 Tesseract OCR。"""
+        """Worker 内：点击底栏 Tab → 截取内容区（持仓 U0 优先 bbox_positions_table）→ 多策略 OCR。"""
         self._refresh_components_cfg()
         cfg = self._cfg
         tab_map = {
@@ -821,28 +880,95 @@ class RpaTradeAdapter:
             raise CriticalRpaError(
                 f"未配置或格式错误: 对应面板的 Tab 坐标（panel_tab_{panel}_xy，须为 [x,y]）"
             )
-        bbox = cfg.get("panel_content_bbox")
+        bbox_kind = "panel_content_bbox"
+        if panel == "positions":
+            pb = cfg.get("bbox_positions_table")
+            if pb and isinstance(pb, (list, tuple)) and len(pb) == 4:
+                bbox = pb
+                bbox_kind = "bbox_positions_table"
+            else:
+                bbox = cfg.get("panel_content_bbox")
+        else:
+            bbox = cfg.get("panel_content_bbox")
         if not bbox or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            if panel == "positions":
+                raise CriticalRpaError(
+                    "持仓 U0 须配置 bbox_positions_table 或 panel_content_bbox（均为 [left,top,width,height]）"
+                )
             raise CriticalRpaError("未配置 panel_content_bbox（须为 [left,top,width,height]）")
 
         if bool(cfg.get("panel_read_bring_front", True)):
             self._wc.bring_to_front()
+
+        wmax = self._cfg.get("window_maximize_button_xy")
+        if wmax is not None and isinstance(wmax, (list, tuple)) and len(wmax) >= 2:
+            self._click_xy((int(wmax[0]), int(wmax[1])), float(self._cfg.get("after_maximize_wait_sec", 0.3)))
+
+        _LOG.info(
+            "[UI_READ] Worker 就绪 panel=%s bbox_source=%s bbox(left,top,w,h)=%s tab_xy=%s,%s",
+            panel,
+            bbox_kind,
+            tuple(int(x) for x in bbox),
+            int(xy[0]),
+            int(xy[1]),
+        )
+
         pause = float(self._cfg.get("mf_click_pause_sec", 0.12))
         self._click_xy((int(xy[0]), int(xy[1])), pause)
-        time.sleep(float(cfg.get("panel_after_tab_wait_sec", 0.45)))
+        tab_wait = float(cfg.get("panel_after_tab_wait_sec", 0.45))
+        if panel == "positions":
+            tab_wait = max(tab_wait, float(cfg.get("positions_table_settle_sec", 0.5)))
+        time.sleep(tab_wait)
 
-        b64 = self._vi.capture_region(tuple(int(x) for x in bbox))
+        bbox_t = tuple(int(x) for x in bbox)
+        try:
+            b64 = self._vi.capture_region(bbox_t)
+        except Exception as e:
+            _LOG.error("[UI_READ] 截图失败 panel=%s bbox=%s: %s", panel, bbox_t, e)
+            raise
+        approx_kb = len(b64) * 0.75 / 1024.0
+        _LOG.info(
+            "[UI_READ] 截图成功 panel=%s PNG_base64_len=%s 约%.1fKB",
+            panel,
+            len(b64),
+            approx_kb,
+        )
+
         ocr_lang = (cfg.get("vlm_tesseract_lang") or "chi_sim+eng").strip() or "eng"
         tess_cmd = str(cfg.get("vlm_tesseract_cmd") or "").strip()
         tess_user_cfg = str(cfg.get("vlm_tesseract_config") or "").strip()
+        _LOG.info(
+            "[UI_READ] Tesseract lang=%s exe=%s（交易界面须 chi_sim；仅英文乱码多半未装中文语言包）",
+            ocr_lang,
+            tess_cmd if tess_cmd else "PATH",
+        )
         txt, _tag, _sc = _ocr_best_for_trade_panel(
             b64,
             lang=ocr_lang,
             tess_cmd=tess_cmd,
             user_tesseract_config=tess_user_cfg,
             include_aggressive=bool(cfg.get("vlm_tesseract_preprocess", True)),
+            pipeline_cfg=cfg,
         )
-        return (txt or "").strip()
+        txt = (txt or "").strip()
+        pv = txt.replace("\n", " ")[:180]
+        if txt:
+            _LOG.info(
+                "[UI_READ] OCR 成功 panel=%s strategy=%s score=%s chars=%s preview=%r",
+                panel,
+                _tag,
+                _sc,
+                len(txt),
+                pv + ("…" if len(txt) > 180 else ""),
+            )
+        else:
+            _LOG.warning(
+                "[UI_READ] OCR 无输出 panel=%s strategy=%s score=%s（裁区可能无文字或 Tesseract 未装好）",
+                panel,
+                _tag,
+                _sc,
+            )
+        return txt
 
     def capture_panel_ocr_text(self, panel: str) -> str:
         """供 UI_READ 信号：串行化点击 Tab + 区域截图 + OCR，返回纯文本。"""

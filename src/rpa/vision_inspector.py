@@ -25,7 +25,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -33,6 +33,9 @@ import requests
 from src.rpa import template_registry
 
 logger = logging.getLogger(__name__)
+
+# chi_sim 缺失时会静默改用 eng，输出会像英文乱码；只告警一次以免刷屏
+_ocr_lang_fallback_to_eng_logged = False
 
 
 def _normalize_vlm_api_url(url: str) -> str:
@@ -59,10 +62,61 @@ def _normalize_vlm_api_url(url: str) -> str:
     return urlunparse((p.scheme, p.netloc, new_path, "", "", ""))
 
 
-def _preprocess_pil_for_ocr(img: Any, mode: str = "aggressive") -> Any:
+def _deskew_gray(gray: Any) -> Any:
+    """对灰度图做轻微倾斜校正；角度可疑或失败则原样返回。"""
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+
+        bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        coords = np.column_stack(np.where(bw > 0))
+        if coords is None or len(coords) < 30:
+            return gray
+        rect = cv2.minAreaRect(coords)
+        angle = rect[-1]
+        if angle < -45:
+            angle = 90 + angle
+        else:
+            angle = -angle
+        if abs(angle) < 0.08 or abs(angle) > 25:
+            return gray
+        h, w = gray.shape[:2]
+        m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+        return cv2.warpAffine(gray, m, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    except Exception:
+        return gray
+
+
+def _maybe_scale_min_edge(gray: Any, target_min_edge: Optional[int]) -> Any:
+    """将较短边放大到至少 target_min_edge（便于笔画接近 ~30px 的量级）。None 则不改。"""
+    if not target_min_edge or target_min_edge <= 0:
+        return gray
+    try:
+        import cv2  # type: ignore
+
+        h, w = gray.shape[:2]
+        m = min(h, w)
+        if m >= target_min_edge:
+            return gray
+        scale = target_min_edge / float(m)
+        nw = max(1, int(round(w * scale)))
+        nh = max(1, int(round(h * scale)))
+        return cv2.resize(gray, (nw, nh), interpolation=cv2.INTER_CUBIC)
+    except Exception:
+        return gray
+
+
+def _preprocess_pil_for_ocr(
+    img: Any,
+    mode: str = "aggressive",
+    *,
+    deskew: bool = False,
+    target_min_edge: Optional[int] = None,
+) -> Any:
     """
     放大过小截图并增强对比。
     ``mild``：仅缩放 + autocontrast，适合抗锯齿字体；``aggressive``：二值化，部分界面会变糊。
+    ``deskew``：OpenCV 轻微纠斜（可选）。``target_min_edge``：保证短边至少该像素（可选）。
     """
     from PIL import ImageOps  # type: ignore
 
@@ -71,11 +125,24 @@ def _preprocess_pil_for_ocr(img: Any, mode: str = "aggressive") -> Any:
     if mode == "mild":
         try:
             from PIL import Image as PILImage  # type: ignore
+            import numpy as np  # type: ignore
 
             g = img.convert("L")
-            w, h = g.size
-            if min(w, h) < 220:
-                g = g.resize((w * 2, h * 2), PILImage.Resampling.LANCZOS)
+            if deskew or target_min_edge:
+                gray = np.array(g)
+                if deskew:
+                    gray = _deskew_gray(gray)
+                gray = _maybe_scale_min_edge(gray, target_min_edge)
+                h, w = gray.shape[:2]
+                if min(h, w) < 220:
+                    import cv2  # type: ignore
+
+                    gray = cv2.resize(gray, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+                g = PILImage.fromarray(gray)
+            else:
+                w, h = g.size
+                if min(w, h) < 220:
+                    g = g.resize((w * 2, h * 2), PILImage.Resampling.LANCZOS)
             return ImageOps.autocontrast(g)
         except Exception:
             return img
@@ -86,6 +153,9 @@ def _preprocess_pil_for_ocr(img: Any, mode: str = "aggressive") -> Any:
         from PIL import Image as PILImage  # type: ignore
 
         gray = np.array(img.convert("L"))
+        if deskew:
+            gray = _deskew_gray(gray)
+        gray = _maybe_scale_min_edge(gray, target_min_edge)
         h, w = gray.shape[:2]
         if min(h, w) < 200:
             gray = cv2.resize(gray, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
@@ -95,7 +165,7 @@ def _preprocess_pil_for_ocr(img: Any, mode: str = "aggressive") -> Any:
         )
         return PILImage.fromarray(thr)
     except Exception:
-        return _preprocess_pil_for_ocr(img, mode="mild")
+        return _preprocess_pil_for_ocr(img, mode="mild", deskew=deskew, target_min_edge=target_min_edge)
 
 
 def _ocr_signal_strength(text: str) -> int:
@@ -106,6 +176,67 @@ def _ocr_signal_strength(text: str) -> int:
     digits = sum(1 for c in t if c.isdigit())
     han = sum(1 for c in t if "\u4e00" <= c <= "\u9fff")
     return len(t) + digits * 5 + han * 4
+
+
+def _ocr_signal_strength_chi_ui(text: str) -> int:
+    """
+    柜台中文界面评分：大幅提高汉字与数字权重，压低「拉丁字母幻觉」得分。
+    避免出现 mild+psm3 一长串 peste/Aites 仍胜过少量正确汉字的结果。
+    """
+    t = re.sub(r"\s+", "", text or "")
+    if not t:
+        return 0
+    han = sum(1 for c in t if "\u4e00" <= c <= "\u9fff")
+    digits = sum(1 for c in t if c.isdigit())
+    latin = sum(1 for c in t if ("a" <= c <= "z") or ("A" <= c <= "Z"))
+    length_bonus = min(len(t), 150)
+
+    score = han * 52 + digits * 18 + length_bonus
+    if han >= 3:
+        score += 80
+    if han >= 1 and digits >= 4:
+        score += 55
+    # 几乎全是英文乱码、几乎没有汉字：强惩罚（典型错误 PSM / 预处理）
+    if han <= 2:
+        excess_latin = max(0, latin - 6)
+        score -= excess_latin * 14
+        if latin >= 14 and han == 0:
+            score -= 120
+
+    return max(score, 0)
+
+
+def _tesseract_extra_from_cfg(cfg: Optional[Dict[str, Any]]) -> str:
+    """从 RPA_CONFIG 拼出追加到 ``config`` 串上的参数（-c …、额外 flags）。"""
+    if not cfg:
+        return ""
+    chunks: List[str] = []
+    raw = str(cfg.get("vlm_tesseract_extra_args") or "").strip()
+    if raw:
+        chunks.append(raw)
+    if cfg.get("vlm_tesseract_preserve_spaces"):
+        chunks.append("-c preserve_interword_spaces=1")
+    if cfg.get("vlm_tesseract_do_invert") is False:
+        chunks.append("-c tessedit_do_invert=0")
+    wl = str(cfg.get("vlm_tesseract_char_whitelist") or "").strip()
+    if wl:
+        # 勿含空格或「=」，否则可能被 Tesseract 截断；数字+字母+中英文一般可直接拼接
+        chunks.append(f"-c tessedit_char_whitelist={wl}")
+    return (" " + " ".join(chunks)).rstrip() if chunks else ""
+
+
+def _pipeline_preprocess_flags(pipeline_cfg: Optional[Dict[str, Any]]) -> Tuple[bool, Optional[int]]:
+    """是否纠斜、目标最短边像素。"""
+    cfg = pipeline_cfg or {}
+    deskew = bool(cfg.get("vlm_tesseract_preprocess_deskew"))
+    te = cfg.get("vlm_tesseract_preprocess_target_min_edge")
+    target_edge: Optional[int] = None
+    if te is not None:
+        try:
+            target_edge = max(80, min(int(te), 4000))
+        except (TypeError, ValueError):
+            target_edge = None
+    return deskew, target_edge
 
 
 def _save_bbox_png_debug(image_b64: str, stem: str = "ocr_pre_trade") -> str:
@@ -126,6 +257,8 @@ def _ocr_png_base64_to_text(
     preprocess: bool = True,
     preprocess_mode: str = "aggressive",
     tesseract_config: str = "--oem 3 --psm 6",
+    preprocess_deskew: bool = False,
+    preprocess_target_min_edge: Optional[int] = None,
 ) -> str:
     """将 PNG Base64 用 Tesseract 抽文本，供不支持多模态的 Chat API 使用。"""
     import pytesseract  # type: ignore
@@ -142,7 +275,12 @@ def _ocr_png_base64_to_text(
     if not preprocess:
         proc = img
     else:
-        proc = _preprocess_pil_for_ocr(img, mode=preprocess_mode or "aggressive")
+        proc = _preprocess_pil_for_ocr(
+            img,
+            mode=preprocess_mode or "aggressive",
+            deskew=preprocess_deskew,
+            target_min_edge=preprocess_target_min_edge,
+        )
 
     cfg = (tesseract_config or "").strip() or "--oem 3 --psm 6"
     try:
@@ -153,11 +291,27 @@ def _ocr_png_base64_to_text(
             "https://github.com/UB-Mannheim/tesseract/wiki ），安装时勾选中文（chi_sim）更利于识别交易界面。"
         ) from e
     except Exception as e:
+        global _ocr_lang_fallback_to_eng_logged
         msg = str(e).lower()
         if (lang or "").lower() != "eng" and (
-            "traineddata" in msg or "language" in msg or "chi_sim" in msg or "could not load" in msg
+            "traineddata" in msg
+            or "language" in msg
+            or "chi_sim" in msg
+            or "could not load" in msg
+            or "failed loading" in msg
+            or "error opening data file" in msg
         ):
-            logger.warning("Tesseract 语言 %r 不可用，改用 eng：%s", lang, e)
+            if not _ocr_lang_fallback_to_eng_logged:
+                _ocr_lang_fallback_to_eng_logged = True
+                logger.warning(
+                    "Tesseract 无法加载语言 %r（%s），已回退到 eng；中文界面会识别成英文乱码。"
+                    "请安装 chi_sim 语言包：Windows 安装 Tesseract 时勾选 Chinese (Simplified)，"
+                    "或把 chi_sim.traineddata 放到 tessdata 目录，并确认 vlm_tesseract_cmd 指向正确 tesseract.exe。",
+                    lang,
+                    e,
+                )
+            else:
+                logger.debug("Tesseract 语言 %r 仍不可用，继续用 eng：%s", lang, e)
             return _ocr_png_base64_to_text(
                 image_b64,
                 lang="eng",
@@ -165,6 +319,8 @@ def _ocr_png_base64_to_text(
                 preprocess=preprocess,
                 preprocess_mode=preprocess_mode,
                 tesseract_config=tesseract_config,
+                preprocess_deskew=preprocess_deskew,
+                preprocess_target_min_edge=preprocess_target_min_edge,
             )
         raise RuntimeError(f"OCR 失败: {e}") from e
 
@@ -176,32 +332,53 @@ def _ocr_best_for_trade_panel(
     tess_cmd: str,
     user_tesseract_config: str,
     include_aggressive: bool = True,
+    pipeline_cfg: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, str, int]:
     """
     多策略 OCR，取信号最强的一版。
     返回 (text, strategy_tag, score)。
+
+    ``pipeline_cfg``：一般为 ``RPA_CONFIG``，可含 ``vlm_tesseract_*``、纠斜开关、白名单等。
     """
+    extra = _tesseract_extra_from_cfg(pipeline_cfg)
+    deskew, target_edge = _pipeline_preprocess_flags(pipeline_cfg)
+
+    lang_l = (lang or "").lower()
+    use_chi_score = "chi" in lang_l
+
     base = (user_tesseract_config or "").strip() or "--oem 3 --psm 6"
-    fallbacks = [base, "--oem 3 --psm 6", "--oem 3 --psm 11", "--oem 3 --psm 3"]
+    # psm 6/11/12/4 适合表格与块文本；psm 3 全自动易把中文表识别成拉丁噪声，放最后兜底
+    fallbacks = [
+        base,
+        "--oem 3 --psm 6",
+        "--oem 3 --psm 11",
+        "--oem 3 --psm 12",
+        "--oem 3 --psm 4",
+        "--oem 3 --psm 13",
+        "--oem 3 --psm 3",
+    ]
     seen: set[str] = set()
     tess_cfgs: list[str] = []
     for c in fallbacks:
-        if c not in seen:
-            seen.add(c)
-            tess_cfgs.append(c)
+        c2 = (c + extra).strip()
+        if c2 not in seen:
+            seen.add(c2)
+            tess_cfgs.append(c2)
 
+    # 每种 PSM：先原图与二值化（常见字更清），再 mild，减少「糊字 mild 反而赢」的误判
     attempts: list[tuple[str, bool, str, str]] = []
     for tc in tess_cfgs:
         row = [
-            (f"mild+{tc}", True, "mild", tc),
             (f"raw+{tc}", False, "none", tc),
             (f"aggr+{tc}", True, "aggressive", tc),
+            (f"mild+{tc}", True, "mild", tc),
         ]
         if not include_aggressive:
             row = [x for x in row if x[2] != "aggressive"]
         attempts.extend(row)
 
     best_text, best_tag, best_sc = "", "", -1
+    score_fn = _ocr_signal_strength_chi_ui if use_chi_score else _ocr_signal_strength
     for tag, use_pre, pmode, tc in attempts:
         try:
             txt = _ocr_png_base64_to_text(
@@ -211,10 +388,12 @@ def _ocr_best_for_trade_panel(
                 preprocess=use_pre,
                 preprocess_mode=pmode,
                 tesseract_config=tc,
+                preprocess_deskew=deskew,
+                preprocess_target_min_edge=target_edge,
             )
         except Exception:
             continue
-        sc = _ocr_signal_strength(txt)
+        sc = score_fn(txt)
         if sc > best_sc:
             best_sc, best_text, best_tag = sc, txt, tag
     return best_text, best_tag, best_sc
@@ -611,6 +790,7 @@ class AiVisionInspector:
                     tess_cmd=tess_cmd,
                     user_tesseract_config=tess_user_cfg,
                     include_aggressive=bool(self._cfg.get("vlm_tesseract_preprocess", True)),
+                    pipeline_cfg=self._cfg,
                 )
                 user_body = (
                     user_text
@@ -713,6 +893,7 @@ class AiVisionInspector:
                 tess_cmd=tess_cmd,
                 user_tesseract_config=tess_user_cfg,
                 include_aggressive=bool(self._cfg.get("vlm_tesseract_preprocess", True)),
+                pipeline_cfg=self._cfg,
             )
             logger.info(
                 "下单前 OCR 多策略结果: score=%s strategy=%s 预览=%r",

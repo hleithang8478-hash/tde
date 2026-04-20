@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """交易执行核心状态机"""
 
+import logging
 import time
 import traceback
 from typing import Dict, Any, Optional
 
 from src.config import MAX_RETRY, ORDER_WAIT_TIMEOUT, ORDER_POLL_INTERVAL, EXECUTOR_SUBMIT_ONLY_MODE
+
+_LOG = logging.getLogger(__name__)
 from src.core.order_signal_validate import assert_order_elements_ready
 from src.notifier.system_notifier import send_notification
 
@@ -72,7 +75,28 @@ class TradeExecutor:
                 if not hasattr(self.broker, "capture_panel_ocr_text"):
                     raise RuntimeError("当前 broker 未实现 capture_panel_ocr_text，无法执行 UI_READ")
                 panel = str(signal.get("ui_panel") or "").strip().lower()
+                _LOG.info(
+                    "[UI_READ] 开始 signal_id=%s ui_panel=%s stock_code=%s → RPA 切 Tab、截图、OCR",
+                    signal_id,
+                    panel,
+                    stock_code,
+                )
                 ocr_text = self.broker.capture_panel_ocr_text(panel)
+                raw_len = len(ocr_text or "")
+                _LOG.info(
+                    "[UI_READ] RPA 返回文本 signal_id=%s chars=%s（即将写入 ui_ocr_text）",
+                    signal_id,
+                    raw_len,
+                )
+                if raw_len == 0:
+                    _LOG.warning(
+                        "[UI_READ] OCR 全文为空 signal_id=%s panel=%s，仍将标记 SUCCESS（监察台会看到空文本）",
+                        signal_id,
+                        panel,
+                    )
+                else:
+                    prev = (ocr_text or "").replace("\r\n", "\n").replace("\n", " ")[:200]
+                    _LOG.info('[UI_READ] OCR 节选 preview="%s%s"', prev, "…" if raw_len > 200 else "")
                 self.repo.complete_ui_read_success(signal_id, ocr_text or "", retry_count)
                 preview = (ocr_text or "")[:800]
                 more = "…" if (ocr_text or "") and len(ocr_text) > 800 else ""
